@@ -1,1 +1,681 @@
-Test
+URLSTATUSOUTLOOKENVPROD.py
+
+import requests
+import urllib3
+import time
+from datetime import datetime
+import win32com.client as win32
+
+# Suppress insecure request warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+print("Checking URL's Status, Please Wait")
+def get_status(url):
+    """Checks the URL and returns a tuple of (status_code, status_message)"""
+    try:
+        response = requests.get(url, timeout=10, verify=False)
+        if response.status_code == 200:
+            return response.status_code, "UP and Running"
+        return response.status_code, f"DOWN ({response.status_code})"
+    except requests.exceptions.ConnectionError:
+        return "FAILED", "Connection Error (Check VPN)"
+    except requests.exceptions.Timeout:
+        return "TIMEOUT", "Server Timeout"
+    except Exception as e:
+        return "ERROR", str(e)
+
+def send_outlook_mail(results):
+    """Sends the formatted results via Outlook Desktop App"""
+    print("Drafting Outlook email")
+    now = datetime.now()
+    hour = now.hour
+    shift = "S1" if 6 <= hour < 15 else "S2" if 15 <= hour < 23 else "S3"
+    date_today = now.strftime("%d %B %Y")
+
+    outlook = win32.Dispatch('outlook.application')
+    mail = outlook.CreateItem(0)
+    mail.To = 'Venkatesh.Sure@carelon.com'  # Update with actual recipient
+    mail.CC = 'Venkatesh.Sure@carelon.com'
+    mail.Subject = f'[SPS Monitoring Report] - PROD Environment URLs Health Check Report - {shift} - {date_today}'  
+    # Building the HTML Table for the email body
+    table_rows = ""
+    for res in results:
+        color = "green" if res['URLStatus'] == "UP and Running" else "red"
+        table_rows += f"""
+        <tr>
+            <td style="border:1px solid #ddd; padding:8px;">{res['Prod Env']}</td>
+            <td style="border:1px solid #ddd; padding:8px;">{res['F5 and Node URLs']}</td>
+            <td style="border:1px solid #ddd; padding:8px;">{res['StatusCode']}</td>
+            <td style="border:1px solid #ddd; padding:8px; color:{color}; font-weight:bold;">{res['URLStatus']}</td>
+        </tr>"""
+
+    mail.HTMLBody = f"""
+    <html>
+    <body>
+            <p>Hi Team,</p>
+            <p>Please find the below Production URL's Health Check report</p>
+    <table style="border-collapse: collapse; width: 100%; font-family: Arial, sans-serif;">
+        <tr style="background-color: #f2f2f2;">
+            <th style="border:1px solid #ddd; padding:8px; text-align:left;">Prod Env</th>
+            <th style="border:1px solid #ddd; padding:8px; text-align:left;">F5 and Node URLs</th>
+            <th style="border:1px solid #ddd; padding:8px; text-align:left;">Status Code</th>
+            <th style="border:1px solid #ddd; padding:8px; text-align:left;">URL Status</th>
+        </tr>
+        {table_rows}
+    </table>
+    <p><i>This is an automated report.</i></p>
+    <p>Regards,<br>Venkatesh Sure</p>
+    """
+    mail.Send()
+    print("Email sent successfully via Outlook.")
+
+# Categorized URLs
+environments = {
+    "PEGA F5": [
+        "https://sps.elevancehealth.com/prweb/",
+        "https://sps.elevancehealth.com/?f5poolstatus",
+        "https://pdm-uix.anthem.com/",
+        "https://pdm-uix.anthem.com/?f5poolstatus",
+        "https://spspegautility.elevancehealth.com/prweb/",
+        "https://pdmapp.elevancehealth.com/prweb/"
+    ],
+    "PEGA Hazelcast": [
+        "https://va10plvpeg516.wellpoint.com:8443/prcluster_service/ClusterServiceHealthCheck",
+        "https://va10plvpeg517.wellpoint.com:8443/prcluster_service/ClusterServiceHealthCheck",
+        "https://va10plvpeg518.wellpoint.com:8443/prcluster_service/ClusterServiceHealthCheck"
+    ],
+    "PEGA Stream Node": [
+        "https://dc04plvpeg391.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04plvpeg391.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04plvpeg392.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04plvpeg392.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04plvpeg393.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04plvpeg393.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04plvpeg394.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04plvpeg394.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+
+    "PEGA PDM Node": [
+        "https://dc04plvpeg395.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04plvpeg395.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04plvpeg396.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04plvpeg396.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04plvpeg397.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04plvpeg397.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04plvpeg398.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04plvpeg398.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04plvpeg399.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04plvpeg399.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+
+    "PEGA WebUser Node": [
+        "https://dc04plvpeg400.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04plvpeg400.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04plvpeg401.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04plvpeg401.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04plvpeg402.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04plvpeg402.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04plvpeg403.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04plvpeg403.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04plvpeg404.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04plvpeg404.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04plvpeg405.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04plvpeg405.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+
+    "Roster Automation": [
+        "https://providerrma.elevancehealth.com/app/dashboard",
+        "https://dc04plvsps300.wellpoint.com:8998/app/dashboard",
+        "https://dc04plvsps301.wellpoint.com:8998/app/dashboard"
+    ],
+    "Prov Restore": [
+        "https://spsaudithistory.elevancehealth.com/?f5poolstatus"
+    ],
+    "Prov360 associated with va10plvwbs669": [
+        "https://provider360.anthem.com/pdsservices/admin/dashboard"
+    ],
+    "Prov360": [
+        "https://netai.prov360prod.awsdns.internal.das/dashboard/"
+    ],
+    "PKM": [
+        "https://pdm-pkm.anthem.com/?f5poolstatus",
+        "https://dc04plvwbs371.wellpoint.com:25694/translationAdapter/testMe",
+        "https://dc04plvwbs371.wellpoint.com:25695/translationAdapter/testMe",
+        "https://dc04plvwbs371.wellpoint.com:25696/translationAdapter/testMe",
+        "https://dc04plvwbs372.wellpoint.com:25694/translationAdapter/testMe",
+        "https://dc04plvwbs372.wellpoint.com:25695/translationAdapter/testMe",
+        "https://dc04plvwbs372.wellpoint.com:25696/translationAdapter/testMe",
+        "https://dc04plvwbs373.wellpoint.com:25694/translationAdapter/testMe",
+        "https://dc04plvwbs373.wellpoint.com:25695/translationAdapter/testMe",
+        "https://dc04plvwbs373.wellpoint.com:25696/translationAdapter/testMe",
+        "https://dc04plvwbs374.wellpoint.com:25694/translationAdapter/testMe",
+        "https://dc04plvwbs374.wellpoint.com:25695/translationAdapter/testMe",
+        "https://dc04plvwbs374.wellpoint.com:25696/translationAdapter/testMe"
+    ],
+
+    "SPS Core Service": [
+        "https://spsservices.anthem.com/?f5poolstatus",
+        "https://spsservices.anthem.com/spsservices",
+        "https://paresspsservices.anthem.com/?f5poolstatus",
+        "https://paresspsservices.anthem.com/spsservices",
+        "https://va10plvwbs628.wellpoint.com:25694/spsservices",
+        "https://va10plvwbs628.wellpoint.com:25695/spsservices",
+        "https://va10plvwbs628.wellpoint.com:25696/spsservices",
+        "https://va10plvwbs629.wellpoint.com:25694/spsservices",
+        "https://va10plvwbs629.wellpoint.com:25695/spsservices",
+        "https://va10plvwbs629.wellpoint.com:25696/spsservices",
+        "https://va10plvwbs630.wellpoint.com:25694/spsservices",
+        "https://va10plvwbs630.wellpoint.com:25695/spsservices",
+        "https://va10plvwbs630.wellpoint.com:25696/spsservices",
+        "https://va10plvwbs744.wellpoint.com:25694/spsservices",
+        "https://va10plvwbs744.wellpoint.com:25695/spsservices",
+        "https://va10plvwbs744.wellpoint.com:25696/spsservices",
+        "https://va10plvwbs745.wellpoint.com:25694/spsservices",
+        "https://va10plvwbs745.wellpoint.com:25695/spsservices",
+        "https://va10plvwbs745.wellpoint.com:25696/spsservices",
+        "https://va10plvwbs746.wellpoint.com:25694/spsservices",
+        "https://va10plvwbs746.wellpoint.com:25695/spsservices",
+        "https://va10plvwbs746.wellpoint.com:25696/spsservices",
+        "https://va10plvwbs747.wellpoint.com:25694/spsservices",
+        "https://va10plvwbs747.wellpoint.com:25695/spsservices",
+        "https://va10plvwbs747.wellpoint.com:25696/spsservices",
+        "https://va10plvwbs748.wellpoint.com:25694/spsservices",
+        "https://va10plvwbs748.wellpoint.com:25695/spsservices",
+        "https://va10plvwbs748.wellpoint.com:25696/spsservices",
+        "https://va10plvwbs749.wellpoint.com:25694/spsservices",
+        "https://va10plvwbs749.wellpoint.com:25695/spsservices",
+        "https://va10plvwbs749.wellpoint.com:25696/spsservices",
+        "https://va10plvwbs750.wellpoint.com:25694/spsservices",
+        "https://va10plvwbs750.wellpoint.com:25695/spsservices",
+        "https://va10plvwbs750.wellpoint.com:25696/spsservices",
+        "https://va10plvwbs751.wellpoint.com:25694/spsservices",
+        "https://va10plvwbs751.wellpoint.com:25695/spsservices",
+        "https://va10plvwbs751.wellpoint.com:25696/spsservices",
+        "https://va10plvwbs752.wellpoint.com:25694/spsservices",
+        "https://va10plvwbs752.wellpoint.com:25695/spsservices",
+        "https://va10plvwbs752.wellpoint.com:25696/spsservices"
+    ],
+    "PDT": [
+        "http://dc04plvcfe305:8070/pdt_fhir_nexus/appHealthCheck",
+        "http://dc04plvcfe305:8071/pdt_fhir_nexus/appHealthCheck",
+        "http://dc04plvcfe305:8072/pdt_fhir_nexus/appHealthCheck",
+        "http://dc04plvcfe305:8073/pdt_fhir_nexus/appHealthCheck",
+        "http://dc04plvcfe305:8074/pdt_fhir_nexus/appHealthCheck",
+        "http://dc04plvcfe305:8075/pdt_fhir_nexus/appHealthCheck",
+        "http://dc04plvcfe305:8076/pdt_fhir_nexus/appHealthCheck",
+        "http://dc04plvcfe305:8077/pdt_fhir_nexus/appHealthCheck",
+        "http://dc04plvcfe305:8078/pdt_fhir_nexus/appHealthCheck",
+        "http://dc04plvcfe305:8078/pdt_fhir_nexus/dashboard",
+        "http://dc04plvcfe305:8070/pdt_fhir_nexus/dashboard?Etl_load_ids=2299,2296",
+    ],
+    "BPD": [
+        "http://dc04plvcfe306.wellpoint.com:45699/bdd/config/findAll",
+        "http://dc04plvcfe306.wellpoint.com:45698/bdd/config/findAll",
+        "http://dc04plvcfe306.wellpoint.com:45697/bdd/config/findAll",
+        "http://dc04plvcfe306.wellpoint.com:35699/bdd/config/findAll",
+        "http://dc04plvcfe306.wellpoint.com:35696/bdd/config/findAll",
+        "http://dc04plvcfe306.wellpoint.com:35697/bdd/config/findAll",
+        "http://dc04plvcfe306.wellpoint.com:25699/bdd/config/findAll",
+        "http://dc04plvcfe306.wellpoint.com:25698/bdd/config/findAll",
+        "http://dc04plvcfe306.wellpoint.com:25697/bdd/config/findAll" 
+    ],
+}
+
+# Run validation and collect results
+all_results = []
+for env_name, url_list in environments.items():
+    for url in url_list:
+        code, status = get_status(url)
+        all_results.append({'Prod Env': env_name, 'F5 and Node URLs': url, 'StatusCode': code, 'URLStatus': status})
+
+# Send the email
+send_outlook_mail(all_results)
+
+run_nonprodpegaurlshealthcheck.bat
+@echo off
+echo Starting URL's Health Check Automation...
+cd /d C:\AutomationTools
+python URLSTATUSOUTLOOKENVPROD.py
+pause
+
+
+URLSTATUSOUTLOOKENVNONPRODPEGA.py
+
+import requests
+import urllib3
+import time
+from datetime import datetime
+import win32com.client as win32
+
+# Suppress insecure request warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+print("Checking URL's Status, Please wait.....")
+def get_status(url):
+    """Checks the URL and returns a tuple of (status_code, status_message)"""
+    try:
+        response = requests.get(url, timeout=10, verify=False)
+        if response.status_code == 200:
+            return response.status_code, "UP and Running"
+        return response.status_code, f"DOWN ({response.status_code})"
+    except requests.exceptions.ConnectionError:
+        return "FAILED", "Connection Error (Check VPN)"
+    except requests.exceptions.Timeout:
+        return "TIMEOUT", "Server Timeout"
+    except Exception as e:
+        return "ERROR", str(e)
+
+def send_outlook_mail(results):
+    """Sends the formatted results via Outlook Desktop App"""
+    print("Drafting Outlook email")
+    now = datetime.now()
+    hour = now.hour
+    shift = "S1" if 6 <= hour < 15 else "S2" if 15 <= hour < 23 else "S3"
+    date_today = now.strftime("%d %B %Y")
+
+    outlook = win32.Dispatch('outlook.application')
+    mail = outlook.CreateItem(0)
+    mail.To = 'Venkatesh.Sure@carelon.com'  # Update with actual recipient
+    mail.CC = 'Venkatesh.Sure@carelon.com'
+    mail.Subject = f'[SPS Monitoring Report] - Non-PROD PEGA Environment URLs Health Check Report - {shift} - {date_today}'  
+    # Building the HTML Table for the email body
+    table_rows = ""
+    for res in results:
+        color = "green" if res['URLStatus'] == "UP and Running" else "red"
+        table_rows += f"""
+        <tr>
+            <!-- Added fixed width and restricted wrapping to the first column -->
+            <td style="border:1px solid #ddd; padding:8px; width: 500px; white-space: nowrap;">{res['Non-Prod Env']}</td>
+            <td style="border:1px solid #ddd; padding:8px;">{res['URLs Info']}</td>
+            <td style="border:1px solid #ddd; padding:8px;">{res['StatusCode']}</td>
+            <td style="border:1px solid #ddd; padding:8px; color:{color}; font-weight:bold;">{res['URLStatus']}</td>
+        </tr>"""
+
+    mail.HTMLBody = f"""
+    <html>
+    <body>
+            <p>Hi Team,</p>
+            <p>Please find the below Non-Production PEGA URL's Health Check report</p>
+    <!-- Note: table-layout: fixed helps enforce specific column widths -->        
+    <table style="border-collapse: collapse; width: 200%; font-family: Arial, sans-serif; table-layout: auto;">
+        <tr style="background-color: #f2f2f2;">
+            <!-- Apply the width to the Header as well -->            
+            <th style="border:1px solid #ddd; padding:8px; text-align:left; width: 500px;">Non-Prod Env</th>
+            <th style="border:1px solid #ddd; padding:8px; text-align:left;">URLs Info</th>
+            <th style="border:1px solid #ddd; padding:8px; text-align:left;">Status Code</th>
+            <th style="border:1px solid #ddd; padding:8px; text-align:left;">URL Status</th>
+        </tr>
+        {table_rows}
+    </table>
+    <p><i>This is an automated report.</i></p>
+    <p>Regards,<br>Venkatesh Sure</p>
+    """
+    mail.Send()
+    print("Email sent successfully via Outlook.")
+
+# Categorized URLs
+environments = {
+    "PEGA DEV1 F5": [
+        "https://sps.upgradedev1.elevancehealth.com/prweb/"
+    ],
+    "PEGA DEV1 \nBackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,AgentRun3BGNodes URL": [
+        "https://dc04dlvpeg319.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "PEGA DEV1 WebUser Node URL": [
+        "https://dc04dlvpeg318.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04dlvpeg318.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04dlvpeg319.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "PEGA DEV2 F5": [
+        "https://sps.upgradedev2.elevancehealth.com/prweb/"
+    ],
+    "PEGA DEV2 \nBackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,AgentRun3BGNodes URL": [
+        "https://dc04dlvpeg324.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "PEGA DEV2 WebUser Node URL": [
+        "https://dc04dlvpeg323.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04dlvpeg323.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04dlvpeg324.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "PEGA DEV3 F5": [
+        "https://sps.upgradedev3.elevancehealth.com/prweb/"
+    ],
+    "PEGA DEV3 \nBackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,AgentRun3BGNodes URL": [
+        "https://dc04dlvpeg327.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "PEGA DEV3 WebUser Node URL": [
+        "https://dc04dlvpeg326.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04dlvpeg326.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04dlvpeg327.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "PEGA DEV4 F5": [
+       "https://sps.upgradedev4.elevancehealth.com/prweb/"
+    ],
+    "PEGA DEV4 \nBackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,AgentRun3BGNodes URL": [
+       "https://dc04dlvpeg330.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "PEGA DEV4 WebUser Node URL": [
+       "https://dc04dlvpeg329.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04dlvpeg329.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04dlvpeg330.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "PEGA DEV5 F5": [
+       "https://sps.upgradedev5.elevancehealth.com/prweb/"
+    ],
+    "PEGA DEV5 \nBackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,AgentRun3BGNodes URL": [
+       "https://dc04dlvpeg333.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "PEGA DEV5 WebUser Node URL": [
+       "https://dc04dlvpeg332.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04dlvpeg332.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04dlvpeg333.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "PEGA DEV6 F5": [
+       "https://sps.upgradedev6.elevancehealth.com/prweb/"
+    ],
+    "PEGA DEV6 \nBackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,AgentRun3BGNodes URL": [
+       "https://dc04dlvpeg336.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "PEGA DEV6 WebUser Node URL": [
+       "https://dc04dlvpeg335.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04dlvpeg335.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04dlvpeg336.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "PEGA DEV7 F5": [
+       "https://sps.upgradedev7.elevancehealth.com/prweb/"
+    ],
+    "PEGA DEV7 \nBackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,AgentRun3BGNodes URL": [
+       "https://dc04dlvpeg339.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "PEGA DEV7 WebUser Node URL": [
+       "https://dc04dlvpeg338.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04dlvpeg338.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04dlvpeg339.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "PEGA SBX1 F5": [
+        "https://sps.pegaupgradesbx1.elevancehealth.com/prweb/"
+    ],
+    "PEGA SBX1 \nBackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,AgentRun3BGNodes URL": [
+        "https://dc04dlvpeg317.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "PEGA SBX1 WebUser Node URL": [
+        "https://dc04dlvpeg317.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "PEGA SBX2 F5": [
+        "https://sps.pegaupgradesbx2.elevancehealth.com/prweb/"
+    ],
+    "PEGA SBX2 \nBackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,AgentRun3BGNodes URL": [
+        "https://dc04dlvpeg322.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "PEGA SBX2 WebUser Node URL": [
+        "https://dc04dlvpeg322.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "PEGA SBX3 F5": [
+        "https://sps.pegaupgradesbx3.elevancehealth.com/prweb/"
+    ],
+    "PEGA SBX3 \nBackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,AgentRun3BGNodes URL": [
+        "https://dc04dlvpeg325.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "PEGA SBX3 WebUser Node URL": [
+        "https://dc04dlvpeg325.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "PEGA SBX4 F5": [
+        "https://sps.pegaupgradesbx4.elevancehealth.com/prweb/"
+    ],
+    "PEGA SBX4 \nBackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,AgentRun3BGNodes URL": [
+        "https://dc04dlvpeg328.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "PEGA SBX4 WebUser Node URL": [
+        "https://dc04dlvpeg328.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "PEGA SBX5 F5": [
+        "https://sps.pegaupgradesbx5.elevancehealth.com/prweb/"
+    ],
+    "PEGA SBX5 \nBackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,AgentRun3BGNodes URL": [
+        "https://dc04dlvpeg331.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "PEGA SBX5 WebUser Node URL": [
+        "https://dc04dlvpeg331.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "PEGA SBX6 F5": [
+        "https://sps.pegaupgradesbx6.elevancehealth.com/prweb/"
+    ],
+    "PEGA SBX6 \nBackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,AgentRun3BGNodes URL": [
+        "https://dc04dlvpeg334.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "PEGA SBX6 WebUser Node URL": [
+        "https://dc04dlvpeg334.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "PEGA SBX7 F5": [
+        "https://sps.pegaupgradesbx7.elevancehealth.com/prweb/"
+    ],
+    "PEGA SBX7 \nBackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,AgentRun3BGNodes URL": [
+        "https://dc04dlvpeg337.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "PEGA SBX7 WebUser Node URL": [
+        "https://dc04dlvpeg337.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "PEGA SIT1 F5": [
+        "https://sps.upgradesit1.elevancehealth.com/prweb/"
+    ],
+    "PEGA SIT1 Node URL": [
+        "https://dc04tlvpeg413.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04tlvpeg413.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04tlvpeg414.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04tlvpeg414.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "PEGA SIT2 F5": [
+        "https://sps.upgradesit2.elevancehealth.com/prweb/"
+    ],
+    "PEGA SIT2 Node URL": [
+        "https://dc04tlvpeg433.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04tlvpeg433.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04tlvpeg434.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04tlvpeg434.wellpoint.com:8444/prweb/PRServlet/",
+    ],
+    "PEGA SIT3 F5": [
+        "https://sps.upgradesit3.elevancehealth.com/prweb/"
+    ],
+    "PEGA SIT3 Node URL": [
+        "https://dc04tlvpeg452.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04tlvpeg452.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04tlvpeg453.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04tlvpeg453.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "PEGA SIT4 F5": [
+       "https://sps.upgradesit4.elevancehealth.com/prweb/"
+    ],
+    "PEGA SIT4 Node URL": [
+       "https://dc04tlvpeg456.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg456.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg457.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg457.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "PEGA SIT5 F5": [
+       "https://sps.upgradesit5.elevancehealth.com/prweb/"
+    ],
+    "PEGA SIT5 Node URL": [
+       "https://dc04tlvpeg460.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg460.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg461.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg461.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "PEGA SIT6 F5": [
+       "https://sps.upgradesit6.elevancehealth.com/prweb/"
+    ],
+    "PEGA SIT6 Node URL": [
+       "https://dc04tlvpeg464.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg464.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg465.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg465.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "PEGA SIT7 F5": [
+       "https://sps.upgradesit7.elevancehealth.com/prweb/"
+    ],
+    "PEGA SIT7 Node URL": [
+       "https://dc04tlvpeg468.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg468.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg469.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg469.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "PEGA UAT1 F5": [
+        "https://sps.upgradeuat1.elevancehealth.com/prweb/"
+    ],
+    "PEGA UAT1 Node URL": [
+        "https://dc04tlvpeg415.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04tlvpeg415.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04tlvpeg416.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04tlvpeg416.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "PEGA UAT2 F5": [
+        "https://sps.upgradeuat2.elevancehealth.com/prweb/"
+    ],
+    "PEGA UAT2 Node URL": [
+        "https://dc04tlvpeg435.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04tlvpeg435.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04tlvpeg436.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04tlvpeg436.wellpoint.com:8444/prweb/PRServlet/",
+    ],
+    "PEGA UAT3 F5": [
+        "https://sps.upgradeuat3.elevancehealth.com/prweb/"
+    ],
+    "PEGA UAT3 Node URL": [
+        "https://dc04tlvpeg454.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04tlvpeg454.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04tlvpeg455.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04tlvpeg455.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "PEGA UAT4 F5": [
+       "https://sps.upgradeuat4.elevancehealth.com/prweb/"
+    ],
+    "PEGA UAT4 Node URL": [
+       "https://dc04tlvpeg458.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg458.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg459.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg459.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "PEGA UAT5 F5": [
+       "https://sps.upgradeuat5.elevancehealth.com/prweb/"
+    ],
+    "PEGA UAT5 Node URL": [
+       "https://dc04tlvpeg462.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg462.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg463.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg463.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "PEGA UAT6 F5": [
+       "https://sps.upgradeuat6.elevancehealth.com/prweb/"
+    ],
+    "PEGA UAT6 Node URL": [
+       "https://dc04tlvpeg466.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg466.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg467.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg467.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "PEGA UAT7 F5": [
+       "https://sps.upgradeuat7.elevancehealth.com/prweb/"
+    ],
+    "PEGA UAT7 Node URL": [
+       "https://dc04tlvpeg470.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg470.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg471.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg471.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "PEGA PERF1 F5": [
+       "https://sps.perf88.elevancehealth.com/prweb/",
+       "https://spspegautility.perf88.elevancehealth.com/prweb/",
+       "https://pdmapp.perf88.elevancehealth.com/prweb/"
+    ],
+    "PEGA PERF1 Node URL": [
+       "https://va10tlvpeg366.wellpoint.com:8443/prcluster_service/ClusterServiceHealthCheck",
+       "https://va10tlvpeg367.wellpoint.com:8443/prcluster_service/ClusterServiceHealthCheck",
+       "https://va10tlvpeg368.wellpoint.com:8443/prcluster_service/ClusterServiceHealthCheck",
+       "https://dc04tlvpeg417.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg417.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg418.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg418.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg419.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg419.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg420.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg420.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg421.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg421.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg422.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg422.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg423.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg423.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg424.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg424.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg425.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg425.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg426.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg426.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg427.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg427.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg428.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg428.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg429.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg429.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg430.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg430.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg431.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg431.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "PEGA PERF2 F5": [
+       "https://sps.perf288.elevancehealth.com/prweb/",
+       "https://spspegautility.perf288.elevancehealth.com/prweb/",
+       "https://pdmapp.perf288.elevancehealth.com/prweb/"
+    ],
+    "PEGA PERF2 Node URL": [
+       "https://va10tlvpeg363.wellpoint.com:8443/prcluster_service/ClusterServiceHealthCheck",
+       "https://va10tlvpeg364.wellpoint.com:8443/prcluster_service/ClusterServiceHealthCheck",
+       "https://va10tlvpeg365.wellpoint.com:8443/prcluster_service/ClusterServiceHealthCheck",
+       "https://dc04tlvpeg437.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg437.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg438.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg438.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg439.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg439.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg440.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg440.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg441.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg441.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg442.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg442.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg443.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg443.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg444.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg444.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg445.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg445.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg446.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg446.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg447.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg447.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg448.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg448.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg449.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg449.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg450.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg450.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg451.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg451.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+}
+
+# Run validation and collect results
+all_results = []
+for env_name, url_list in environments.items():
+    for url in url_list:
+        code, status = get_status(url)
+        all_results.append({'Non-Prod Env': env_name, 'URLs Info': url, 'StatusCode': code, 'URLStatus': status})
+
+# Send the email
+send_outlook_mail(all_results)
+
+run_nonprodpegaurlshealthcheck.bat
+@echo off
+echo Starting URL's Health Check Automation...
+cd /d C:\AutomationTools
+python URLSTATUSOUTLOOKENVNONPRODPEGA.py
+pause
