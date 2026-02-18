@@ -1,1 +1,422 @@
 
+import paramiko
+import time
+import requests
+import urllib3
+import sys
+import re
+import win32com.client as win32
+import io
+import logging
+import subprocess
+from datetime import datetime
+
+# Suppress SSL warnings for internal domains
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# --- LOGGER SETUP ---
+class EmailLogger(object):
+    def __init__(self):
+        self.terminal = sys.stdout
+        self.log = io.StringIO()
+
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+
+    def flush(self):
+        self.terminal.flush()
+
+    def get_log(self):
+        return self.log.getvalue()
+
+# Initialize the logger
+logger = EmailLogger()
+sys.stdout = logger
+
+def recorded_input(prompt):
+    """Replacement for input() that records the response in the log."""
+    user_choice = input(prompt)
+    # Manually write the user's response to the log since input() doesn't
+    print(f" [USER INPUT]: {user_choice}") 
+    return user_choice
+
+def pre_flight_check():
+    """Ensures the user has updated credentials from CyberArk."""
+    check = recorded_input("\nHave u updated the password for Non-Prod that received from Cyberark in this script before using it? (yes/no): ").strip().lower()
+    if check == 'yes':
+        print("\nProceeding with automation of JVM's Stop on DEV1 Environment\n")
+    else:
+        print("\nPROMPT: Please change the password in the script using the latest CyberArk credentials and try again.")
+        sys.exit(0)
+
+
+# --- Configuration ---
+SERVERS = {
+    "server1-dc04dlvpeg318": {"host": "dc04dlvpeg318", "user": "an453200ad", "pass": "#!rYkER!42Az4e3aDhHZ"},
+    "server2-dc04dlvpeg319": {"host": "dc04dlvpeg319", "user": "an453200ad", "pass": "#!rYkER!42Az4e3aDhHZ"}
+}
+SERVICE_ID = "srcspsad"
+TOMCAT_PATH = "/apps/tomcatService"
+
+
+# 2. Global Function Definition (Available to everything below)
+def create_ssh_connection(server_name, server_data):
+    print(f"Connecting to {server_name}...")
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        client.connect(
+            hostname=server_data["host"], 
+            username=server_data["user"], 
+            password=server_data["pass"]
+        )
+        return client
+    except Exception as e:
+        print(f"Error: {e}")
+        return None
+
+# Mapping for URL polling
+JVM_URLS = {
+    "WebUserNode_dc04dlvpeg319:8443": "https://dc04dlvpeg319.wellpoint.com:8443/prweb/PRServlet/",
+    "WebUserNode_dc04dlvpeg318:8443": "https://dc04dlvpeg318.wellpoint.com:8443/prweb/PRServlet/",
+    "WebUserNode_dc04dlvpeg318:8444": "https://dc04dlvpeg318.wellpoint.com:8444/prweb/PRServlet/",
+    "BackgroundProcessing,BIX,Stream,Search,AgentRun1BGNode,AgentRun2BGNodes,AgentRun3BGNodes_dc04dlvpeg319:8444": "https://dc04dlvpeg319.wellpoint.com:8444/prweb/PRServlet/"
+}
+
+#Checking URL's Status at the End of Script
+CHECK_URLS = [
+    "https://sps.upgradedev1.elevancehealth.com/prweb/",
+    "https://dc04dlvpeg319.wellpoint.com:8443/prweb/PRServlet/",
+    "https://dc04dlvpeg318.wellpoint.com:8443/prweb/PRServlet/",
+    "https://dc04dlvpeg318.wellpoint.com:8444/prweb/PRServlet/",
+    "https://dc04dlvpeg319.wellpoint.com:8444/prweb/PRServlet/"
+]
+
+def run_remote_cmd(ssh_client, command, use_service_id=True):
+    full_cmd = f"sudo -u {SERVICE_ID} {command}" if use_service_id else command
+    _, stdout, _ = ssh_client.exec_command(full_cmd)
+    return stdout.read().decode().strip()
+
+def wait_for_jvm_url_stop(url, jvm_name, timeout=10):
+    """Polls the URL until it returns a non-200 status or connection fails."""
+    print(f"--- Polling {jvm_name} at {url} to confirm stop ---")
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        try:
+            response = requests.get(url, timeout=10, verify=False)
+            if response.status_code != 200:
+                print(f"SUCCESS: {jvm_name} returned {response.status_code}. It is down!")
+                return True
+        except requests.exceptions.RequestException:
+            print(f"SUCCESS: {jvm_name} connection refused. It is down!")
+            return True
+        time.sleep(10)
+    print(f"FAILURE: {jvm_name} is still returning 200 OK after {timeout}s.")
+    return False
+
+def verify_kafka_status(ssh_client, server_name):
+    """
+    Verifies the Kafka JVM process Status on the specified server.
+    Returns the PID if running, or None if already down.
+    """
+    print(f"\n--- Verifying Kafka Status on {server_name} Before Stopping the BackgroundProcessing,BIX,Stream,Search,AgentRun1BGNode,AgentRun2BGNodes,AgentRun3BGNodes ---")
+
+    # Use pgrep -f to find processes matching the specific Kafka path
+    # This is more robust than manual grep + awk piping 
+    search_cmd = "pgrep -f '/apps/tomcat9/kafka'"
+
+    # Run command without sudo to check for process existence        
+    output = run_remote_cmd(ssh_client, search_cmd, use_service_id=False)
+    
+    # 1. Check if output is empty or whitespace(Process is already down)
+    if not output or not output.strip():
+        print(f"INFO: Kafka JVM is already down on {server_name}. No action needed.")
+        return None
+    
+    # 2. Process is running If we got a result, it's likely the PID of the still-running process
+    pid = output.strip()
+    
+    # Validation: Ensure the PID is actually numeric before returning
+    if pid.isdigit():
+        print(f"CHECK: Kafka Process running with (PID: {pid}) before stopping the BackgroundProcessing,BIX,Stream,Search,AgentRun1BGNode,AgentRun2BGNodes,AgentRun3BGNodes")
+        return pid
+    else:
+        print(f"WARNING: Unexpected output from pgrep: {pid}")
+        return None
+
+
+def kill_and_verify_kafka(ssh_client, server_name):
+    """Reliably finds and kills Kafka processes ONLY on the specified server."""
+    print(f"\n--- Processing Kafka on {server_name} ---")
+    
+    # The [k] prevents grep from finding itself in the process list
+    search_cmd = "ps -ef | grep '/apps/tomcat9/[k]afka' | awk '{print $2}'"
+    
+    # Search without sudo to ensure full process table visibility
+    output = run_remote_cmd(ssh_client, search_cmd, use_service_id=False)
+    
+    if output:
+        pids = output.splitlines()
+        for pid in pids:
+            pid = pid.strip()
+            if pid.isdigit():
+                print(f"Force killing Kafka PID: {pid} on {server_name}")
+                run_remote_cmd(ssh_client, f"kill -l", use_service_id=True)  #kill -9 {pid}
+        time.sleep(2)
+    else:
+        print(f"No active Kafka processes found on {server_name}.")
+
+    # Final verification
+    verify_output = run_remote_cmd(ssh_client, search_cmd, use_service_id=False)
+    if not verify_output:
+        print(f"VERIFIED: Kafka is cleared on {server_name}.\n")
+        return True
+    else:
+        print(f"CRITICAL: Kafka still detected on {server_name}! PIDs: {verify_output}\n")
+        return False
+
+def check_jvms_status(label, ssh1, ssh2):
+    print("\n" + "="*72)
+    print(f"--- {label} ---")
+    print("="*72)
+    
+    # Give JVMs time to initialize before checking
+    print("Waiting 30 seconds for processes to settle...")
+    time.sleep(30)
+
+    # Iterating through both passed connections
+    for name, conn in [("dc04dlvpeg318", ssh1), ("dc04dlvpeg319", ssh2)]:
+        try:
+            print(f"\n--- Checking JVM Status on {name} ---")
+            
+            # Execute command using the passed connection 'conn'
+            tomcat_processes = run_remote_cmd(conn, "ps -ef | grep tomcat | grep -v grep", use_service_id=False)
+            
+            if tomcat_processes and tomcat_processes.strip():
+                # Print the actual output returned from the server
+                print(f"RUNNING PROCESSES:\n{tomcat_processes}")
+            else:
+                print(f"WARNING: No Tomcat processes found on {name}!")
+                
+        except Exception as e:
+            # Printing the specific error 'e' is critical for debugging SSH issues
+            print(f"An Error Occurred on {name}: {str(e)}")
+
+def check_url_status(label):
+    print(f"\n---- {label} ----\n")
+    for url in CHECK_URLS:
+        try:
+            response = requests.get(url, timeout=10, verify=False)
+            print(f"✅URL: {url} | Status: {response.status_code}")
+        except Exception:
+            print(f"❌URL: {url} | Status: DOWN")
+
+# --- EMAIL FUNCTION ---
+def send_outlook_report(content):
+    try:
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        outlook = win32.Dispatch('outlook.application')
+        mail = outlook.CreateItem(0)
+        mail.To = 'venkatesh.sure@carelon.com'
+        mail.Subject = f'Testing Script - DEV1 Environment Stopping JVMs Shutdown Report - {timestamp}'
+        
+        # HTML formatting to keep the console look
+        mail.HTMLBody = f"""
+        <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
+            <h2 style="color: #2b579a;">Script Execution Log in Servers</h2>
+            <p><strong>Run Date:</strong> {timestamp}</p>
+            <hr>
+            <div style="background-color: #f4f4f4; padding: 15px; border: 1px solid #ddd; border-radius: 5px;">
+                <pre style="font-family: 'Consolas', 'Courier New', monospace; white-space: pre-wrap; word-wrap: break-word; word-break: break-all;">{content}</pre>
+            </div>
+        </div>
+        """
+        mail.Send()
+        print("\n>>> Email report dispatched successfully.")
+    except Exception as e:
+        # We use sys.__stdout__ here to ensure the error prints even if logging fails
+        sys.__stdout__.write(f"\nFAILED TO SEND EMAIL: {e}\n")
+
+def main():
+
+    # 1. SETUP OUTPUT CAPTURE
+    output_buffer = io.StringIO()
+    # Save the original stdout so we can print to the screen and the buffer
+    original_stdout = sys.stdout 
+
+    # 2. Custom writer to print to BOTH console and the buffer
+    class Logger(object):
+        def write(self, data):
+            original_stdout.write(data)
+            output_buffer.write(data)
+        def flush(self):
+            original_stdout.flush()
+
+    sys.stdout = Logger()
+
+    # 3. Password Confirmation
+    pre_flight_check()
+
+    try:
+        # 4. Setup Connections
+        ssh1 = paramiko.SSHClient()
+        ssh1.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh1.connect(SERVERS["server1-dc04dlvpeg318"]["host"], 
+                     username=SERVERS["server1-dc04dlvpeg318"]["user"], 
+                     password=SERVERS["server1-dc04dlvpeg318"]["pass"])
+        print("Connection to server1 dc04dlvpeg318 was successful")
+        
+        ssh2 = paramiko.SSHClient()
+        ssh2.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh2.connect(SERVERS["server2-dc04dlvpeg319"]["host"], 
+                     username=SERVERS["server2-dc04dlvpeg319"]["user"], 
+                     password=SERVERS["server2-dc04dlvpeg319"]["pass"])
+        print("Connection to server1 dc04dlvpeg319 was successful")
+
+        # 5. Verifying JVM's Status Before Stopping the JVM's
+        check_jvms_status("Verfiying Running Tomcat JVM's Status in Servers before Stopping", ssh1, ssh2)
+
+
+        # 6. Verifying WebUser Nodes Status before Stopping them
+        print("\nVerifying Below WebUser Nodes Status\ndc04dlvpeg318-8443\ndc04dlvpeg319-8443\ndc04dlvpeg318-8444\n")
+        run_remote_cmd(ssh2, f"{TOMCAT_PATH}/tomcat-01 status")
+        run_remote_cmd(ssh1, f"{TOMCAT_PATH}/tomcat-01 status")
+        run_remote_cmd(ssh1, f"{TOMCAT_PATH}/tomcat-02 status")
+
+  if all these webuser nodes were returning with pid then go to below logic
+
+        # 7. Stopping WebUser Nodes
+        print("\nStopping Below WebUser Nodes\ndc04dlvpeg318-8443\ndc04dlvpeg319-8443\ndc04dlvpeg318-8444\n")
+        run_remote_cmd(ssh2, f"{TOMCAT_PATH}/tomcat-01 status") #stop
+        run_remote_cmd(ssh1, f"{TOMCAT_PATH}/tomcat-01 status") #stop
+        run_remote_cmd(ssh1, f"{TOMCAT_PATH}/tomcat-02 status") #stop
+
+
+        # 3. Map your JVMs to their respective SSH connections
+        print("Verification Loop Started for WebUser Nodes:\n - dc04dlvpeg319:8443\n - dc04dlvpeg318:8443\n - dc04dlvpeg318:8444\n")
+        
+        # Using specific patterns that match the unique startup string of each JVM
+        jvm_targets = [
+            (ssh2, "tomcat-01", "dc04dlvpeg319-8443"),
+            (ssh1, "tomcat-01", "dc04dlvpeg318-8443"),
+            (ssh1, "tomcat-02", "dc04dlvpeg318-8444")
+        ]
+
+        attempts = 0
+        max_attempts = 3
+        all_stopped = False
+
+        while attempts < max_attempts:
+            still_running = []
+            attempts += 1
+    
+            for ssh, pattern, name in jvm_targets:
+                # Use pgrep with:
+                # -f: search full command line
+                # -w: match whole word (prevents tomcat-01 matching tomcat-010)
+                # We exclude 'grep' and 'pgrep' strings themselves
+                cmd = f"pgrep -f {pattern}"
+                
+                try:
+                    raw_pid = run_remote_cmd(ssh, cmd, use_service_id=False).strip()
+                    
+                    if raw_pid:
+                        # Convert multi-line PIDs into a single comma-separated string
+                        clean_pid = raw_pid.replace('\n', ', ')
+                        still_running.append(f"{name} (PIDs: {clean_pid})")
+                except Exception as e:
+                    print(f"Error checking {name}: {e}")
+
+            if not still_running:
+                print(f"\n[Attempt {attempts}/{max_attempts}] SUCCESS: All JVMs have fully stopped.")
+                all_stopped = True
+                break
+    
+            print(f"[Attempt {attempts}/{max_attempts}] Still running: {'; '.join(still_running)}")
+            
+            if attempts < max_attempts:
+                print(f"Waiting 10 seconds for nodes to finish shutdown...")
+                time.sleep(10)
+
+        if not all_stopped:
+            print("\n" + "!"*60)
+            print("CRITICAL: Manual intervention required! The following nodes failed to stop:")
+            for item in still_running:
+                print(f" >> {item}")
+            print("!"*60 + "\n")
+
+
+        # 4. URL Polling Verification As well- SKIP LOGIC ENABLED
+        # We check each JVM; if any return False (failure), we skip to final status.
+        jvm_checks = [
+            (JVM_URLS["WebUserNode_dc04dlvpeg319:8443"], "WebUserNode_dc04dlvpeg319:8443"),
+            (JVM_URLS["WebUserNode_dc04dlvpeg318:8443"], "WebUserNode_dc04dlvpeg318:8443"),
+            (JVM_URLS["WebUserNode_dc04dlvpeg318:8444"], "WebUserNode_dc04dlvpeg318:8444")
+        ]
+
+        for url, name in jvm_checks:
+            if not wait_for_jvm_url_stop(url, name):
+                print(f"\nABORTING: {name} failed to stop. Skipping BackgroundProcessing,BIX,Stream,Search,AgentRun1BGNode,AgentRun2BGNodes,AgentRun3BGNodes stop and Kafka cleanup.")
+                check_url_status("Immediate Status Check (Failure)")
+                return # Exits main() and goes to 'finally' block
+
+        # 8. Verifying Kafka Process Status before stopping the BackgroundProcessing,BIX,Stream,Search,AgentRun1BGNode,AgentRun2BGNodes,AgentRun3BGNodes
+        verify_kafka_status(ssh2, "dc04dlvpeg319")
+
+        # 5. Stop Final Service on Server 2 (Only reached if previous JVMs stopped)
+        print("\nStopping BackgroundProcessing,BIX,Stream,Search,AgentRun1BGNode,AgentRun2BGNodes,AgentRun3BGNodes Tomcat-02 on Server dc04dlvpeg319\ni.e BackgroundProcessing,BIX,Stream,Search,AgentRun1BGNode,AgentRun2BGNodes,AgentRun3BGNodes_dc04dlvpeg319:8444")
+        run_remote_cmd(ssh2, f"{TOMCAT_PATH}/tomcat-02 status")
+        if not wait_for_jvm_url_stop(JVM_URLS["BackgroundProcessing,BIX,Stream,Search,AgentRun1BGNode,AgentRun2BGNodes,AgentRun3BGNodes_dc04dlvpeg319:8444"], "BackgroundProcessing,BIX,Stream,Search,AgentRun1BGNode,AgentRun2BGNodes,AgentRun3BGNodes_dc04dlvpeg319:8444"):
+            print(f"\nABORTING: BackgroundProcessing,BIX,Stream,Search,AgentRun1BGNode,AgentRun2BGNodes,AgentRun3BGNodes failed to stop. Skipping Kafka cleanup.")
+            check_url_status("Immediate Status Check (Failure)")
+            return
+            print("BackgroundProcessing,BIX,Stream,Search,AgentRun1BGNode,AgentRun2BGNodes,AgentRun3BGNodes dc04dlvpeg319:8444 was Stopped")
+
+        # 6. Kafka Check(Server 2 Only) & Cleanup (Both Servers) - Kafka process reached means that ALL JVMs are stopped
+        # We only call the Kafka function for ssh2 (Server 2)
+        kill_and_verify_kafka(ssh2, "dc04dlvpeg319")
+        print("Kafka check complete")
+
+  if all these webuser nodes pid were empty then go to below logic for checking kafka process and stopping BackgroundProcessing,BIX,Stream,Search,AgentRun3BGNodes
+
+        # 8. Verifying Kafka Process Status before stopping the BackgroundProcessing,BIX,Stream,Search,AgentRun1BGNode,AgentRun2BGNodes,AgentRun3BGNodes
+        verify_kafka_status(ssh2, "dc04dlvpeg319")
+
+        # 5. Stop Final Service on Server 2 (Only reached if previous JVMs stopped)
+        print("\nStopping BackgroundProcessing,BIX,Stream,Search,AgentRun1BGNode,AgentRun2BGNodes,AgentRun3BGNodes Tomcat-02 on Server dc04dlvpeg319\ni.e BackgroundProcessing,BIX,Stream,Search,AgentRun1BGNode,AgentRun2BGNodes,AgentRun3BGNodes_dc04dlvpeg319:8444")
+        run_remote_cmd(ssh2, f"{TOMCAT_PATH}/tomcat-02 status")
+        if not wait_for_jvm_url_stop(JVM_URLS["BackgroundProcessing,BIX,Stream,Search,AgentRun1BGNode,AgentRun2BGNodes,AgentRun3BGNodes_dc04dlvpeg319:8444"], "BackgroundProcessing,BIX,Stream,Search,AgentRun1BGNode,AgentRun2BGNodes,AgentRun3BGNodes_dc04dlvpeg319:8444"):
+            print(f"\nABORTING: BackgroundProcessing,BIX,Stream,Search,AgentRun1BGNode,AgentRun2BGNodes,AgentRun3BGNodes failed to stop. Skipping Kafka cleanup.")
+            check_url_status("Immediate Status Check (Failure)")
+            return
+            print("BackgroundProcessing,BIX,Stream,Search,AgentRun1BGNode,AgentRun2BGNodes,AgentRun3BGNodes dc04dlvpeg319:8444 was Stopped")
+
+        # 6. Kafka Check(Server 2 Only) & Cleanup (Both Servers) - Kafka process reached means that ALL JVMs are stopped
+        # We only call the Kafka function for ssh2 (Server 2)
+        kill_and_verify_kafka(ssh2, "dc04dlvpeg319")
+        print("Kafka check complete")
+
+        # 7. Final JVM's Status
+        check_jvms_status("Final Status Check on Tomcat Running JVM's in Servers", ssh1, ssh2)
+        
+        # 8. Final URL's Status
+        check_url_status("Final URL Status Health Check")
+
+    except Exception as e:
+        print(f"\nAn error occurred during execution: {e}")
+    finally:
+        ssh1.close()
+        ssh2.close()
+        print(f"\nConnections to servers dc04dlvpeg318,dc04dlvpeg319 was closed")
+
+        # 2. EXTRACT LOG AND SEND EMAIL
+        log_content = output_buffer.getvalue()
+        sys.stdout = original_stdout # Restore original stdout
+        
+        send_outlook_report(log_content)
+
+
+if __name__ == "__main__":
+    main()
+ 
