@@ -1,1 +1,818 @@
+import requests
+import urllib3
+import time
+import win32com.client as win32
+from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib3.exceptions import InsecureRequestWarning
 
+# Suppress the "InsecureRequestWarning" caused by verify=False
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
+
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    import pytz as ZoneInfo # Fallback for older versions
+
+# 1. Configuration: Set Time Zones
+IST = ZoneInfo("Asia/Kolkata")
+ET = ZoneInfo("America/New_York")
+fmt = "%Y-%m-%d %I:%M:%S %p %Z"
+# 2. Start Time (No Microseconds)
+start_ist = datetime.now(IST).replace(microsecond=0)
+start_et = start_ist.astimezone(ET)
+print(f"\n🚀 Non-Prod WBS Env URL's Checking started at {start_ist.strftime(fmt)}/{start_et.strftime(fmt)}")
+print("\nChecking URL's Status, Please Wait...")
+
+def get_status(task):
+    """Checks the URL and returns a dictionary with metadata"""
+    # Unpack the tuple (env_name, url) passed from executor
+    env_name, url = task 
+
+    try:
+        # Use a timeout and disable SSL verification as requested
+        response = requests.get(url, timeout=10, verify=False)
+        status_code = response.status_code
+        content = response.text
+        
+        if status_code == 200:
+            # Inline style for GREEN color and center alignment
+            status_msg = (
+                '<div style="color: green; font-weight: bold;">'
+                'UP and Running'
+                '</div>'
+            )
+        elif status_code == 404:
+            # Check if the environment belongs to NodeURL or F5
+            if env_name in environments_NodeURL_Appwise:
+                # Inline style for RED color and center alignment
+                # Use <br> for HTML email line breaks
+                status_msg = (
+                    f'<div style="color: green; font-weight: bold;">JVM UP</div>'
+		    f'<div style="color: red; font-weight: bold;">'
+                    f'but URL was DOWN<br>Context Root Not Found'
+                    f'</div>'
+                )
+            elif env_name in environments_F5_Appwise:
+                # Inline style for RED color and center alignment
+                # Use <br> for HTML email line breaks
+                status_msg = (
+		    f'<div style="color: red; font-weight: bold;">'
+                    f'URL was DOWN<br>Context Root Not Found'
+                    f'</div>'
+                )           
+        else:
+            # Inline style for RED color and center alignment
+            # Use <br> for HTML email line breaks
+            status_msg = (
+                f'<div style="color: red;">'
+                f'DOWN ({status_code})<br>Service Unavailable'
+                f'</div>'
+            )
+    except requests.exceptions.ConnectionError:
+        # Inline style for RED color and center alignment
+        # Use <br> for HTML email line breaks
+        status_code, status_msg = "FAILED", '<div style="color: red;">This site can’t be reached<br>URL Refused to connect</div>'
+    except requests.exceptions.Timeout:
+        # Inline style for Orange color and center alignment
+        status_code, status_msg = "TIMEOUT", '<div style="color: orange;">Server Timeout</div>'
+    except Exception as e:
+        # Inline style for RED color and center alignment
+        status_code, status_msg = "ERROR", f'<div style="color: red;">{str(e)}</div>'
+
+    # Helper to wrap text in a centering div for the final return
+    center = lambda x: f'<div style="text-align: center;">{x}</div>'
+
+    return {
+        'Non-Prod Env URL': env_name,
+        'F5 and Node URLs Info': url,
+        'StatusCode': center(status_code),
+        'URLStatus': center(status_msg)  # Already wrapped in its own styled div
+    }
+    
+def send_outlook_mail(results, duration_str, end_et):
+    """Sends the formatted results via Outlook Desktop App categorized by Appwise group"""
+    print("\nDrafting Outlook email...")
+    now = datetime.now()
+    hour = now.hour
+    shift = "S1" if 6 <= hour < 15 else "S2" if 15 <= hour < 23 else "S3"
+    date_today = now.strftime("%d %B %Y")
+    fmt = "%Y-%m-%d %H:%M:%S"
+
+    # Separate results into groups
+    sps_rows = ""
+    pkm_rows = ""
+    match_rows = ""
+
+    for res in results:
+        color = "green" if res['URLStatus'] == "UP and Running" else "red"
+        row_html = f"""
+        <tr>
+            <td style="border:1px solid #ddd; padding:8px; width: 200px; white-space: nowrap;">{res['Non-Prod Env URL']}</td>
+            <td style="border:1px solid #ddd; padding:8px; width: 20px;">{res['F5 and Node URLs Info']}</td>
+            <td style="border:1px solid #ddd; padding:8px; text-align:center;">{res['StatusCode']}</td>
+            <td style="border:1px solid #ddd; padding:8px; color:{color}; font-weight:bold; text-align:center;">{res['URLStatus']}</td>
+        </tr>"""
+
+        # Logic to bucket results based on the label
+        if "WBS" in res['Non-Prod Env URL']:
+            sps_rows += row_html
+        elif "PKM" in res['Non-Prod Env URL']:
+            pkm_rows += row_html
+        elif "MATCH" in res['Non-Prod Env URL']:
+            match_rows += row_html
+
+    outlook = win32.Dispatch('outlook.application')
+    mail = outlook.CreateItem(0)
+    mail.To = 'Venkatesh.Sure@carelon.com'
+    mail.CC = 'Venkatesh.Sure@carelon.com'
+    mail.Subject = f'[SPS Monitoring Report] - Non-PROD ENV WBS URLs Health Check Report - {shift} - {date_today}'
+
+    # Common Table Header
+    table_header = """
+    <!-- Note: table-layout: fixed helps enforce specific column widths -->        
+    <table style="border-collapse: collapse; width: 77.5%; font-family: Arial, sans-serif; table-layout: fixed;">
+        <tr style="background-color: #f2f2f2;">
+            <th style="border:1px solid #ddd; padding:8px; text-align:left; width: 325px;">Non-Prod Env URL</th>
+            <!-- Reduced width and added overflow control -->
+            <th style="border:1px solid #ddd; padding:8px; text-align:left; width: 10px; overflow: hidden; text-overflow: ellipsis;">URLs Info</th>
+            <th style="border:1px solid #ddd; padding:8px; text-align:center;width: 150px;">Status Code</th>
+            <th style="border:1px solid #ddd; padding:8px; text-align:center;width: 300px;">URL Health Status</th>
+        </tr>"""
+    mail.HTMLBody = f"""
+    <html>
+    <body>
+        <p>Hi Team,</p>
+        <p>Please find the Non-Production <b style="color: #EAB003; font-weight:bold;">SPSCORESERVICES</b> Env, <b style="color: #EAB003; font-weight:bold;">PKM</b> Env and <b style="color: #EAB003; font-weight:bold;">MDM/MATCH</b> Env URLs Health Check report below.</p>
+	<p>Non-Prod WBS Env URL's Checking Started at <i>{start_et.strftime(fmt)}</i>.</p>
+
+        <h3>1. SPSCORESERVICES (WBS) Env URL's Health Check Status</h3>
+        {table_header}
+        {sps_rows if sps_rows else "<tr><td colspan='4'>No WBS data found</td></tr>"}
+        </table>
+
+        <h3>2. PKM Env URL's Health Check Status</h3>
+        {table_header}
+        {pkm_rows if pkm_rows else "<tr><td colspan='4'>No PKM data found</td></tr>"}
+        </table>
+
+        <h3>3. MATCH/MDM Env URL's Health Check Status</h3>
+        {table_header}
+        {match_rows if match_rows else "<tr><td colspan='4'>No MATCH data found</td></tr>"}
+        </table>
+        <p>
+           Non-Prod WBS Env URL's Checking Finished at <i>{end_et.strftime(fmt)}</i>.<br>
+           Non-Prod WBS Env URL's Status Health Check Verified within <i>{duration_str}.</i>
+        </p>
+        <p><i>This is an automated report.</i></p>
+        <p>Regards,<br>Venkatesh Sure</p>
+    </body>
+    </html>
+    """
+    mail.Send()
+    print("Email sent successfully via Outlook.")
+
+
+# Categorized URLs
+environments_F5_Appwise = {
+    # SPSCORESERVICES GROUP
+    "DEV02 WBS F5": [
+        "https://spsservices.dev02.hb.anthem.com/spsservices"
+    ],
+    "DEV02 WBS F5 POOL STATUS": [
+        "https://spsservices.dev02.hb.anthem.com/?f5poolstatus"
+    ],
+    "DEV2 WBS F5": [
+        "https://spsservices.dev2.hb.anthem.com/spsservices"
+    ],
+    "DEV2 WBS F5 POOL STATUS": [
+        "https://spsservices.dev2.hb.anthem.com/?f5poolstatus"
+    ],
+    "DEV03 WBS F5": [
+        "https://spsservices.dev03.hb.anthem.com/spsservices"
+    ],
+    "DEV03 WBS F5 POOL STATUS": [
+        "https://spsservices.dev03.hb.anthem.com/?f5poolstatus"
+    ],
+    "DEV3 WBS F5": [
+        "https://spsservices.dev3.hb.anthem.com/spsservices"
+    ],
+    "DEV3 WBS F5 POOL STATUS": [
+        "https://spsservices.dev3.hb.anthem.com/?f5poolstatus"
+    ],
+    "DEV04 WBS F5": [
+        "https://spsservices.dev04.hb.anthem.com/spsservices"
+    ],
+    "DEV04 WBS F5 POOL STATUS": [
+        "https://spsservices.dev04.hb.anthem.com/?f5poolstatus"
+    ],
+    "DEV4 WBS F5": [
+        "https://spsservices.dev4.hb.anthem.com/spsservices"
+    ],
+    "DEV4 WBS F5 POOL STATUS": [
+        "https://spsservices.dev4.hb.anthem.com/?f5poolstatus"
+    ],
+    "DEV05 WBS F5": [
+        "https://spsservices.dev05.hb.anthem.com/spsservices"
+    ],
+    "DEV05 WBS F5 POOL STATUS": [
+        "https://spsservices.dev05.hb.anthem.com/?f5poolstatus"
+    ],
+    "DEV07 WBS F5": [
+        "https://spsservices.dev07.hb.anthem.com/spsservices"
+    ],
+    "DEV07 WBS F5 POOL STATUS": [
+        "https://spsservices.dev07.hb.anthem.com/?f5poolstatus"
+    ],
+    "DEV08 WBS F5": [
+        "https://spsservices.dev08.hb.anthem.com/spsservices"
+    ],
+    "DEV08 WBS F5 POOL STATUS": [
+        "https://spsservices.dev08.hb.anthem.com/?f5poolstatus"
+    ],
+    "DEV10 WBS F5": [
+        "https://spsservices.dev10.hb.anthem.com/spsservices"
+    ],
+    "DEV10 WBS F5 POOL STATUS": [
+        "https://spsservices.dev10.hb.anthem.com/?f5poolstatus"
+    ],
+    "DEV11 WBS F5": [
+        "https://spsservices.dev11.hb.anthem.com/spsservices"
+    ],
+    "DEV11 WBS F5 POOL STATUS": [
+        "https://spsservices.dev11.hb.anthem.com/?f5poolstatus"
+    ],
+    "DEV12 WBS F5": [
+        "https://spsservices.dev12.hb.anthem.com/spsservices"
+    ],
+    "DEV12 WBS F5 POOL STATUS": [
+        "https://spsservices.dev12.hb.anthem.com/?f5poolstatus"
+    ],
+    "DEV13 WBS F5": [
+        "https://spsservices.dev13.hb.anthem.com/spsservices"
+    ],
+    "DEV13 WBS F5 POOL STATUS": [
+        "https://spsservices.dev13.hb.anthem.com/?f5poolstatus"
+    ],
+    "DEV14 WBS F5": [
+        "https://spsservices.dev14.hb.anthem.com/spsservices"
+    ],
+    "DEV14 WBS F5 POOL STATUS": [
+        "https://spsservices.dev14.hb.anthem.com/?f5poolstatus"
+    ],
+    "SB1 WBS F5": [
+        "https://spsservices.sb1.hb.anthem.com/spsservices"
+    ],
+    "SB1 WBS F5 POOL STATUS": [
+        "https://spsservices.sb1.hb.anthem.com/?f5poolstatus"
+    ],
+    "SB2 WBS F5": [
+        "https://spsservices.sb2.hb.anthem.com/spsservices"
+    ],
+    "SB2 WBS F5 POOL STATUS": [
+        "https://spsservices.sb2.hb.anthem.com/?f5poolstatus"
+    ],
+    "SIT1 WBS F5": [
+        "https://spsservices.sit.va.anthem.com/spsservices"
+    ],
+    "SIT1 WBS F5 POOL STATUS": [
+        "https://spsservices.sit.va.anthem.com/?f5poolstatus"
+    ],
+    "SIT2 WBS F5": [
+        "https://spsservices.sit2.hb.anthem.com/spsservices"
+    ],
+    "SIT2 WBS F5 POOL STATUS": [
+        "https://spsservices.sit2.hb.anthem.com/?f5poolstatus"
+    ],
+    "SIT02 WBS F5": [
+        "https://spsservices.sit02.hb.anthem.com/spsservices"
+    ],
+    "SIT02 WBS F5 POOL STATUS": [
+        "https://spsservices.sit02.hb.anthem.com/?f5poolstatus"
+    ],
+    "SIT03 WBS F5": [
+        "https://spsservices.sit03.hb.anthem.com/spsservices"
+    ],
+    "SIT03 WBS F5 POOL STATUS": [
+        "https://spsservices.sit03.hb.anthem.com/?f5poolstatus"
+    ],
+    "SIT3 WBS F5": [
+        "https://spsservices.sit3.va.anthem.com/spsservices"
+    ],
+    "SIT3 WBS F5 POOL STATUS": [
+        "https://spsservices.sit3.va.anthem.com/?f5poolstatus"
+    ],
+    "SIT4 WBS F5": [
+        "https://spsservices.sit4.hb.anthem.com/spsservices"
+    ],
+    "SIT4 WBS F5 POOL STATUS": [
+        "https://spsservices.sit4.hb.anthem.com/?f5poolstatus"
+    ],
+    "SIT05 WBS F5": [
+        "https://spsservices.sit05.hb.anthem.com/spsservices"
+    ],
+    "SIT05 WBS F5 POOL STATUS": [
+        "https://spsservices.sit05.hb.anthem.com/?f5poolstatus"
+    ],
+    "SIT06 WBS F5": [
+        "https://spsservices.sit06.hb.anthem.com/spsservices"
+    ],
+    "SIT06 WBS F5 POOL STATUS": [
+        "https://spsservices.sit06.hb.anthem.com/?f5poolstatus"
+    ],
+    "SIT07 WBS F5": [
+        "https://spsservices.sit07.hb.anthem.com/spsservices"
+    ],
+    "SIT07 WBS F5 POOL STATUS": [
+        "https://spsservices.sit07.hb.anthem.com/?f5poolstatus"
+    ],
+    "SIT08 WBS F5": [
+        "https://spsservices.sit08.hb.anthem.com/spsservices"
+    ],
+    "SIT08 WBS F5 POOL STATUS": [
+        "https://spsservices.sit08.hb.anthem.com/?f5poolstatus"
+    ],
+    "SIT09 WBS F5": [
+        "https://spsservices.sit09.hb.anthem.com/spsservices"
+    ],
+    "SIT09 WBS F5 POOL STATUS": [
+        "https://spsservices.sit09.hb.anthem.com/?f5poolstatus"
+    ],
+    "sit10 WBS F5": [
+        "https://spsservices.sit10.hb.anthem.com/spsservices"
+    ],
+    "sit10 WBS F5 POOL STATUS": [
+        "https://spsservices.sit10.hb.anthem.com/?f5poolstatus"
+    ],
+    "sit11 WBS F5": [
+        "https://spsservices.sit11.hb.anthem.com/spsservices"
+    ],
+    "sit11 WBS F5 POOL STATUS": [
+        "https://spsservices.sit11.hb.anthem.com/?f5poolstatus"
+    ],
+    "sit12 WBS F5": [
+        "https://spsservices.sit12.hb.anthem.com/spsservices"
+    ],
+    "sit12 WBS F5 POOL STATUS": [
+        "https://spsservices.sit12.hb.anthem.com/?f5poolstatus"
+    ],
+    "sit13 WBS F5": [
+        "https://spsservices.sit13.hb.anthem.com/spsservices"
+    ],
+    "sit13 WBS F5 POOL STATUS": [
+        "https://spsservices.sit13.hb.anthem.com/?f5poolstatus"
+    ],
+    "sit14 WBS F5": [
+        "https://spsservices.sit14.hb.anthem.com/spsservices"
+    ],
+    "sit14 WBS F5 POOL STATUS": [
+        "https://spsservices.sit14.hb.anthem.com/?f5poolstatus"
+    ],
+    "UAT1 WBS F5": [
+        "https://spsservices.uat.va.anthem.com/spsservices"
+    ],
+    "UAT1 WBS F5 POOL STATUS": [
+        "https://spsservices.uat.va.anthem.com/?f5poolstatus"
+    ],
+    "UAT2 WBS F5": [
+        "https://spsservices.uat2.hb.anthem.com/spsservices"
+    ],
+    "UAT2 WBS F5 POOL STATUS": [
+        "https://spsservices.uat2.hb.anthem.com/?f5poolstatus"
+    ],
+    "UAT3 WBS F5": [
+        "https://spsservices.uat3.hb.anthem.com/spsservices"
+    ],
+    "UAT3 WBS F5 POOL STATUS": [
+        "https://spsservices.uat3.hb.anthem.com/?f5poolstatus"
+    ],
+    "UAT4 WBS F5": [
+        "https://spsservices.uat4.hb.anthem.com/spsservices"
+    ],
+    "UAT4 WBS F5 POOL STATUS": [
+        "https://spsservices.uat4.hb.anthem.com/?f5poolstatus"
+    ],
+    "UAT05 WBS F5": [
+        "https://spsservices.uat05.va.anthem.com/spsservices"
+    ],
+    "UAT05 WBS F5 POOL STATUS": [
+        "https://spsservices.uat05.va.anthem.com/?f5poolstatus"
+    ],
+    "uat11 WBS F5": [
+        "https://spsservices.uat11.hb.anthem.com/spsservices"
+    ],
+    "uat11 WBS F5 POOL STATUS": [
+        "https://spsservices.uat11.hb.anthem.com/?f5poolstatus"
+    ],
+    "uat13 WBS F5": [
+        "https://spsservices.uat13.hb.anthem.com/spsservices"
+    ],
+    "uat13 WBS F5 POOL STATUS": [
+        "https://spsservices.uat13.hb.anthem.com/?f5poolstatus"
+    ],
+    "uat14 WBS F5": [
+        "https://spsservices.uat14.hb.anthem.com/spsservices"
+    ],
+    "uat14 WBS F5 POOL STATUS": [
+        "https://spsservices.uat14.hb.anthem.com/?f5poolstatus"
+    ],
+    "PERFWBS F5": [
+        "https://spsservices.perf.va.anthem.com/spsservices"
+    ],
+    "PERFWBS F5 POOL STATUS": [
+        "https://spsservices.perf.va.anthem.com/?f5poolstatus"
+    ],
+    "PERFPARESWBS F5": [
+        "https://paresspsservices.perf.va.anthem.com/spsservices"
+    ],
+    "PERFPARESWBS F5 POOL STATUS": [
+        "https://paresspsservices.perf.va.anthem.com/?f5poolstatus"
+    ],
+    "PERFUIXWBS F5": [
+        "https://spsuixservices.prf.anthem.com/spsservices"
+    ],
+    "PERFUIXWBS F5 POOL STATUS": [
+        "https://spsuixservices.prf.anthem.com/?f5poolstatus"
+    ],
+    
+    # PKM GROUP
+    "PKMDev1 F5 Pool Status": [
+        "https://pdm-pkm.dev.anthem.com/?f5poolstatus"
+    ],
+    "PKMDev2 F5 Pool Status": [
+        "https://pdm-pkm.dev2.anthem.com/?f5poolstatus"
+    ],
+    "PKMSit1 F5 Pool Status": [
+        "https://pdm-pkm.sit.anthem.com/?f5poolstatus"
+    ],
+    "PKMSit2 F5 Pool Status": [
+        "https://pdm-pkm.sit2.anthem.com/?f5poolstatus"
+    ],
+    "PKMUat1 F5 Pool Status": [
+        "https://pdm-pkm.uat.anthem.com/?f5poolstatus"
+    ],
+    "PKMUat2 F5 Pool Status": [
+        "https://pdm-pkm.uat2.anthem.com/?f5poolstatus"
+    ],
+    "PKMPerf F5 Pool Status": [
+        "https://pdm-pkm.perf.anthem.com/?f5poolstatus"
+    ],
+}
+environments_NodeURL_Appwise = {
+    # SPSCORESERVICES GROUP
+    "DEV02 WBS NODE": [
+        "https://va33dlvwbs390.wellpoint.com:25695/spsservices",
+        "https://va33dlvwbs391.wellpoint.com:25695/spsservices"
+    ],
+    "DEV2 WBS NODE": [
+        "https://va33dlvwbs313.wellpoint.com:25694/spsservices",
+        "https://va33dlvwbs314.wellpoint.com:25694/spsservices"
+    ],
+    "DEV03 WBS NODE": [
+        "https://va33dlvwbs388.wellpoint.com:25695/spsservices",
+        "https://va33dlvwbs389.wellpoint.com:25695/spsservices"
+    ],
+    "DEV3 WBS NODE": [
+        "https://dc04dlvwbs338.wellpoint.com:25695/spsservices",
+        "https://dc04dlvwbs339.wellpoint.com:25695/spsservices"
+    ],
+    "DEV04 WBS NODE": [
+        "https://va33dlvwbs384.wellpoint.com:25695/spsservices",
+        "https://va33dlvwbs387.wellpoint.com:25695/spsservices"
+    ],
+    "DEV4 WBS NODE": [
+        "https://va33dlvwbs370.wellpoint.com:25695/spsservices",
+        "https://va33dlvwbs371.wellpoint.com:25695/spsservices"
+    ],
+    "DEV05 WBS NODE": [
+        "https://va33dlvwbs382.wellpoint.com:25695/spsservices",
+        "https://va33dlvwbs383.wellpoint.com:25695/spsservices"
+    ],
+    "DEV07 WBS NODE": [
+        "https://va33dlvwbs400.wellpoint.com:25695/spsservices",
+        "https://va33dlvwbs401.wellpoint.com:25695/spsservices"
+    ],
+    "DEV08 WBS NODE": [
+        "https://va33dlvwbs398.wellpoint.com:25695/spsservices",
+        "https://va33dlvwbs399.wellpoint.com:25695/spsservices"
+    ],
+    "DEV10 WBS NODE": [
+        "https://va33dlvwbs385.wellpoint.com:25695/spsservices",
+        "https://va33dlvwbs386.wellpoint.com:25695/spsservices"
+    ],
+    "DEV11 WBS NODE": [
+        "https://va33dlvwbs381.wellpoint.com:25695/spsservices",
+        "https://va33dlvwbs392.wellpoint.com:25695/spsservices"
+    ],
+    "DEV12 WBS NODE": [
+        "https://va33dlvwbs396.wellpoint.com:25695/spsservices",
+        "https://va33dlvwbs397.wellpoint.com:25695/spsservices"
+    ],
+    "DEV13 WBS NODE": [
+        "https://va33dlvwbs404.wellpoint.com:25695/spsservices",
+        "https://va33dlvwbs405.wellpoint.com:25695/spsservices"
+    ],
+    "DEV14 WBS NODE": [
+        "https://va33dlvwbs406.wellpoint.com:25695/spsservices",
+        "https://va33dlvwbs407.wellpoint.com:25695/spsservices"
+    ],
+    "SB1 WBS NODE": [
+        "https://va33tlvwbs545.wellpoint.com:25695/spsservices",
+        "https://va33tlvwbs545.wellpoint.com:25696/spsservices"
+    ],
+    "SB2 WBS NODE": [
+        "https://va33tlvwbs544.wellpoint.com:25695/spsservices",
+        "https://va33tlvwbs544.wellpoint.com:25696/spsservices"
+    ],
+    "SIT1 WBS NODE": [
+        "https://dc04tlvwbs398.wellpoint.com:25694/spsservices",
+        "https://dc04tlvwbs398.wellpoint.com:25695/spsservices",
+        "https://dc04tlvwbs399.wellpoint.com:25694/spsservices",
+        "https://dc04tlvwbs399.wellpoint.com:25695/spsservices"
+    ],
+    "SIT2 WBS NODE": [
+        "https://va33tlvwbs356.wellpoint.com:25694/spsservices",
+        "https://va33tlvwbs356.wellpoint.com:25695/spsservices",
+        "https://va33tlvwbs357.wellpoint.com:25694/spsservices",
+        "https://va33tlvwbs357.wellpoint.com:25695/spsservices"
+    ],
+    "SIT02 WBS NODE": [
+        "https://va33dlvwbs390.wellpoint.com:25696/spsservices",
+        "https://va33dlvwbs391.wellpoint.com:25696/spsservices"
+    ],
+    "SIT03 WBS NODE": [
+        "https://va33dlvwbs388.wellpoint.com:25696/spsservices",
+        "https://va33dlvwbs389.wellpoint.com:25696/spsservices"
+    ],
+    "SIT3 WBS NODE": [
+        "https://dc04tlvwbs398.wellpoint.com:25696/spsservices",
+        "https://dc04tlvwbs398.wellpoint.com:25697/spsservices",
+        "https://dc04tlvwbs399.wellpoint.com:25696/spsservices",
+        "https://dc04tlvwbs399.wellpoint.com:25697/spsservices"
+    ],
+    "SIT4 WBS NODE": [
+        "https://va33tlvwbs539.wellpoint.com:25695/spsservices",
+        "https://va33tlvwbs539.wellpoint.com:25696/spsservices",
+        "https://va33tlvwbs540.wellpoint.com:25695/spsservices",
+        "https://va33tlvwbs540.wellpoint.com:25696/spsservices"
+    ],
+    "SIT05 WBS NODE": [
+        "https://va33dlvwbs382.wellpoint.com:25696/spsservices",
+        "https://va33dlvwbs383.wellpoint.com:25696/spsservices"
+    ],
+    "SIT06 WBS NODE": [
+        "https://va33dlvwbs384.wellpoint.com:25696/spsservices",
+        "https://va33dlvwbs387.wellpoint.com:25696/spsservices"
+    ],
+    "SIT07 WBS NODE": [
+        "https://va33dlvwbs400.wellpoint.com:25696/spsservices",
+        "https://va33dlvwbs401.wellpoint.com:25696/spsservices"
+    ],
+    "SIT08 WBS NODE": [
+        "https://va33dlvwbs398.wellpoint.com:25696/spsservices",
+        "https://va33dlvwbs399.wellpoint.com:25696/spsservices"
+    ],
+    "SIT09 WBS NODE": [
+        "https://va33tlvwbs543.wellpoint.com:25696/spsservices",
+        "https://va33tlvwbs568.wellpoint.com:25696/spsservices"
+    ],
+    "sit10 WBS NODE": [
+        "https://va33dlvwbs385.wellpoint.com:25696/spsservices",
+        "https://va33dlvwbs386.wellpoint.com:25696/spsservices"
+    ],
+    "sit11 WBS NODE": [
+        "https://va33dlvwbs381.wellpoint.com:25696/spsservices",
+        "https://va33dlvwbs392.wellpoint.com:25696/spsservices"
+    ],
+    "sit12 WBS NODE": [
+        "https://va33dlvwbs396.wellpoint.com:25696/spsservices",
+        "https://va33dlvwbs397.wellpoint.com:25696/spsservices"
+    ],
+    "sit13 WBS NODE": [
+        "https://va33dlvwbs404.wellpoint.com:25696/spsservices",
+        "https://va33dlvwbs405.wellpoint.com:25696/spsservices"
+    ],
+    "sit14 WBS NODE": [
+        "https://va33dlvwbs406.wellpoint.com:25696/spsservices",
+        "https://va33dlvwbs407.wellpoint.com:25696/spsservices"
+    ],
+    "UAT1 WBS NODE": [
+        "https://dc04tlvwbs396.wellpoint.com:25694/spsservices",
+        "https://dc04tlvwbs396.wellpoint.com:25695/spsservices",
+        "https://dc04tlvwbs397.wellpoint.com:25694/spsservices",
+        "https://dc04tlvwbs397.wellpoint.com:25695/spsservices"
+    ],
+    "UAT2 WBS NODE": [
+        "https://va33tlvwbs358.wellpoint.com:25694/spsservices",
+        "https://va33tlvwbs358.wellpoint.com:25695/spsservices",
+        "https://va33tlvwbs359.wellpoint.com:25694/spsservices",
+        "https://va33tlvwbs359.wellpoint.com:25695/spsservices"
+    ],
+    "UAT3 WBS NODE": [
+        "https://dc04tlvwbs396.wellpoint.com:25696/spsservices",
+        "https://dc04tlvwbs396.wellpoint.com:25697/spsservices",
+        "https://dc04tlvwbs397.wellpoint.com:25696/spsservices",
+        "https://dc04tlvwbs397.wellpoint.com:25697/spsservices"
+    ],
+    "UAT4 WBS NODE": [
+        "https://va33tlvwbs541.wellpoint.com:25695/spsservices",
+        "https://va33tlvwbs541.wellpoint.com:25696/spsservices",
+        "https://va33tlvwbs542.wellpoint.com:25695/spsservices",
+        "https://va33tlvwbs542.wellpoint.com:25696/spsservices"
+    ],
+    "UAT05 WBS NODE": [
+        "https://va10dlvwbs358.wellpoint.com:25695/spsservices",
+        "https://va10dlvwbs359.wellpoint.com:25695/spsservices"
+    ],
+    "uat11 WBS NODE": [
+        "https://va33tlvwbs569.wellpoint.com:25695/spsservices",
+        "https://va33tlvwbs570.wellpoint.com:25695/spsservices"
+    ],
+    "uat13 WBS NODE": [
+        "https://va33tlvwbs574.wellpoint.com:25695/spsservices",
+        "https://va33tlvwbs575.wellpoint.com:25695/spsservices"
+    ],
+    "uat14 WBS NODE": [
+        "https://va33tlvwbs574.wellpoint.com:25696/spsservices",
+        "https://va33tlvwbs575.wellpoint.com:25696/spsservices"
+    ],
+    "PERFWBS Node": [
+        "https://va10tlvwbs710.wellpoint.com:25694/spsservices",
+        "https://va10tlvwbs711.wellpoint.com:25694/spsservices",
+        "https://va10tlvwbs711.wellpoint.com:25695/spsservices",
+        "https://va10tlvwbs712.wellpoint.com:25694/spsservices",
+        "https://va10tlvwbs712.wellpoint.com:25695/spsservices",
+        "https://va10tlvwbs713.wellpoint.com:25694/spsservices",
+        "https://va10tlvwbs713.wellpoint.com:25695/spsservices",
+        "https://va10tlvwbs713.wellpoint.com:25696/spsservices",
+        "https://va10tlvwbs714.wellpoint.com:25694/spsservices",
+        "https://va10tlvwbs714.wellpoint.com:25695/spsservices",
+        "https://va10tlvwbs714.wellpoint.com:25696/spsservices",
+        "https://va10tlvwbs715.wellpoint.com:25694/spsservices",
+        "https://va10tlvwbs715.wellpoint.com:25695/spsservices",
+        "https://va10tlvwbs715.wellpoint.com:25696/spsservices",
+        "https://va10tlvwbs716.wellpoint.com:25694/spsservices",
+        "https://va10tlvwbs716.wellpoint.com:25695/spsservices",
+        "https://va10tlvwbs716.wellpoint.com:25696/spsservices",
+        "https://va10tlvwbs717.wellpoint.com:25694/spsservices",
+        "https://va10tlvwbs717.wellpoint.com:25695/spsservices",
+        "https://va10tlvwbs717.wellpoint.com:25696/spsservices",
+        "https://va10tlvwbs718.wellpoint.com:25694/spsservices",
+        "https://va10tlvwbs718.wellpoint.com:25695/spsservices",
+        "https://va10tlvwbs718.wellpoint.com:25696/spsservices",
+        "https://va10tlvwbs719.wellpoint.com:25694/spsservices",
+        "https://va10tlvwbs719.wellpoint.com:25695/spsservices",
+        "https://va10tlvwbs719.wellpoint.com:25696/spsservices",
+        "https://va10tlvwbs720.wellpoint.com:25694/spsservices",
+        "https://va10tlvwbs720.wellpoint.com:25695/spsservices",
+        "https://va10tlvwbs720.wellpoint.com:25696/spsservices",
+        "https://va10tlvwbs721.wellpoint.com:25694/spsservices"
+    ],
+    "PERFPARESWBS Node": [
+        "https://va10tlvwbs710.wellpoint.com:25695/spsservices",
+        "https://va10tlvwbs710.wellpoint.com:25696/spsservices",
+        "https://va10tlvwbs721.wellpoint.com:25695/spsservices",
+        "https://va10tlvwbs721.wellpoint.com:25696/spsservices"
+    ],
+    "PERFUIXWBS Node": [
+        "https://va10tlvwbs711.wellpoint.com:25696/spsservices",
+        "https://va10tlvwbs712.wellpoint.com:25696/spsservices"
+    ],
+
+    # PKM GROUP
+    "PKMDev1 NODE": [
+        "https://dc04dlvwbs331.wellpoint.com:25695/translationAdapter/testMe",
+        "https://dc04dlvwbs331.wellpoint.com:25696/translationAdapter/testMe"
+    ],
+    "PKMDev2 NODE": [
+        "https://dc04dlvwbs330.wellpoint.com:25695/translationAdapter/testMe",
+        "https://dc04dlvwbs330.wellpoint.com:25696/translationAdapter/testMe"
+    ],
+    "PKMSit1 NODE": [
+        "https://dc04tlvwbs367.wellpoint.com:25694/translationAdapter/testMe",
+        "https://dc04tlvwbs367.wellpoint.com:25695/translationAdapter/testMe",
+        "https://dc04tlvwbs367.wellpoint.com:25696/translationAdapter/testMe",
+        "https://dc04tlvwbs367.wellpoint.com:25697/translationAdapter/testMe"
+    ],
+    "PKMSit2 NODE": [
+        "https://dc04tlvwbs365.wellpoint.com:25695/translationAdapter/testMe",
+        "https://dc04tlvwbs365.wellpoint.com:25696/translationAdapter/testMe"
+    ],
+    "PKMUat1 NODE": [
+        "https://dc04tlvwbs369.wellpoint.com:25694/translationAdapter/testMe",
+        "https://dc04tlvwbs369.wellpoint.com:25695/translationAdapter/testMe",
+        "https://dc04tlvwbs369.wellpoint.com:25696/translationAdapter/testMe",
+        "https://dc04tlvwbs369.wellpoint.com:25697/translationAdapter/testMe"
+    ],
+    "PKMUat2 NODE": [
+        "https://dc04tlvwbs368.wellpoint.com:25695/translationAdapter/testMe",
+        "https://dc04tlvwbs368.wellpoint.com:25696/translationAdapter/testMe"
+    ],
+    "PKMPerf NODE": [
+        "https://dc04tlvwbs386.wellpoint.com:25694/translationAdapter/testMe",
+        "https://dc04tlvwbs386.wellpoint.com:25695/translationAdapter/testMe",
+        "https://dc04tlvwbs386.wellpoint.com:25696/translationAdapter/testMe",
+        "https://dc04tlvwbs387.wellpoint.com:25694/translationAdapter/testMe",
+        "https://dc04tlvwbs387.wellpoint.com:25695/translationAdapter/testMe",
+        "https://dc04tlvwbs387.wellpoint.com:25696/translationAdapter/testMe",
+        "https://dc04tlvwbs388.wellpoint.com:25694/translationAdapter/testMe",
+        "https://dc04tlvwbs388.wellpoint.com:25695/translationAdapter/testMe",
+        "https://dc04tlvwbs388.wellpoint.com:25696/translationAdapter/testMe",
+        "https://dc04tlvwbs389.wellpoint.com:25694/translationAdapter/testMe",
+        "https://dc04tlvwbs389.wellpoint.com:25695/translationAdapter/testMe",
+        "https://dc04tlvwbs389.wellpoint.com:25696/translationAdapter/testMe"
+    ],
+    # MATCH/MDM GROUP
+    "MATCH PERF SERVER Inspector": [
+        "https://va10tlvwbs628.wellpoint.com:10047/inspector/common/login.ihtml",
+        "https://va10tlvwbs629.wellpoint.com:10047/inspector/common/login.ihtml"
+    ],
+    "MATCH PERF SERVER Console": [
+        "https://va10tlvwbs628.wellpoint.com:10002/ibm/console/logon.jsp",
+        "https://va10tlvwbs629.wellpoint.com:10002/ibm/console/logon.jsp"
+    ],
+}
+
+# 1. Define the desired order of environments
+env_keys = ["DEV02", "DEV2", "DEV03", "DEV3", "DEV04", "DEV4", "DEV05", "DEV07", "DEV08", "DEV10", "DEV11", "DEV12", "DEV13", "DEV14", "SB1", "SB2", "SIT1", "SIT2", "SIT02", "SIT03", "SIT3", "SIT4", "SIT05", "SIT06", "SIT07", "SIT08", "SIT09", "sit10", "sit11", "sit12", "sit13", "sit14", "UAT1", "UAT2", "UAT3", "UAT4", "UAT05", "uat11", "uat13", "uat14", "PERFWBS",
+"PERFPARESWBS","PERFUIXWBS", "PKMDev1", "PKMDev2", "PKMSit1", "PKMSit2", "PKMUat1", "PKMUat2", "PKMPerf", "MATCH PERF"]
+
+tasks = []
+seen_labels = set()
+
+# 2. Build tasks in a specific order: Environment F5 -> Environment Node
+# along with App wise SPSCORESERVICES -> PKM
+for key in env_keys:
+    # Add F5 SPSCORESERVICES (WBS) URLs for the env
+    for label, urls in environments_F5_Appwise.items():
+        if key in label and "WBS" in label:
+            for url in urls:
+                tasks.append((label, url))
+            seen_labels.add(label)
+
+    # Add PKM F5 URLs
+    for label, urls in environments_F5_Appwise.items():
+        if key in label and "PKM" in label:
+            for url in urls:
+                tasks.append((label, url))
+            seen_labels.add(label)
+    
+    # Add SPSCORESERVICES (WBS) Node URLs for the env
+    for label, urls in environments_NodeURL_Appwise.items():
+        if key in label and "WBS" in label:
+            for url in urls:
+                tasks.append((label, url))
+            seen_labels.add(label)
+
+    # Add PKM Node URLs
+    for label, urls in environments_NodeURL_Appwise.items():
+        if key in label and "PKM" in label:
+            for url in urls:
+                tasks.append((label, url))
+            seen_labels.add(label)
+
+    # Add MATCH/MDM Node URLs
+    for label, urls in environments_NodeURL_Appwise.items():
+        if key in label and "MATCH" in label:
+            for url in urls:
+                tasks.append((label, url))
+            seen_labels.add(label)
+
+# 3. Add any leftover labels that weren't in your env_keys (e.g., "others")
+all_f5andNodeURL_Appwise = {**environments_F5_Appwise, **environments_NodeURL_Appwise}
+for label, urls in all_f5andNodeURL_Appwise.items():
+    if label not in seen_labels:
+        for url in urls:
+            tasks.append((label, url))
+
+print(f"🚀 Checking {len(tasks)} URLs in parallel...")
+
+# 2. Worker function for the thread
+def check_url(task):
+    # env_name, url = task
+    # Call your previously defined get_status function
+    # Note: get_status already handles the logic and returns a dict
+    return get_status(task)
+
+# 4. Execute and Print using ThreadPoolExecutor for I/O-bound URL checking and to Execute in parallel with RETRIEVE in order based on Env Wise
+with ThreadPoolExecutor(max_workers=25) as executor:
+    # map() maintains the order of the 'tasks' list
+    # executor.map preserves the order of the input 'tasks'
+    all_results = list(executor.map(check_url, tasks))
+
+# 2. End Time (No Microseconds) & Duration Calculation in Hours, Minutes, and Seconds
+end_ist = datetime.now(IST).replace(microsecond=0)
+end_et = end_ist.astimezone(ET)
+duration = end_ist - start_ist
+total_seconds = int(duration.total_seconds())
+# Breaking down total seconds
+hours, remainder = divmod(total_seconds, 3600)
+minutes, seconds = divmod(remainder, 60)
+print(f"\n🏁 Non-Prod WBS Env URL's Checking Finished at: {end_ist.strftime(fmt)}/{end_et.strftime(fmt)}")
+duration_str = f"{hours}h {minutes}m {seconds}s"
+print(f"\n⏱️ Non-Prod WBS Env URL's Status Health Check Verification Duration: {duration_str}")
+
+# Send the email
+send_outlook_mail(all_results, duration_str, end_et)
