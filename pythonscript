@@ -1,656 +1,430 @@
-import paramiko
-import time
 import requests
 import urllib3
-import sys
-import re
-import win32com.client as win32
-import io
-import logging
-import socket
-import subprocess
+import time
 from datetime import datetime, timedelta
+import win32com.client as win32
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# Suppress SSL warnings for internal domains
+# Suppress insecure request warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-def pre_flight_check():
-    """Ensures the user has updated credentials from CyberArk and lets the user choose an action."""
-    
-    # 1. Credential Check
-    prompt_msg = "\nHave you updated the password for Non-Prod received from CyberArk? (yes/no): "
-    if recorded_input(prompt_msg).strip().lower() != 'yes':
-        print("\nPROMPT: Please update the password in the script using the latest CyberArk credentials and try again.")
-        sys.exit(0)
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    import pytz as ZoneInfo # Fallback for older versions
 
-    # 2. Define Actions
-    actions = {
-        "1": ("stop", "🛑 Stop JVMs"),
-        "2": ("stopwithclearcache", "🛑 Stop JVMs and Clear Cache"),
-        "3": ("start", "🚀 Start JVMs"),
-        "4": ("startwithclearcache", "🚀 Clear Cache and Start JVMs"),
-        "5": ("restart", "🔄 Restart JVMs"),
-        "6": ("restartwithclearcache", "🔄 Restart JVMs with Clear Cache")
+# 1. Configuration: Set Time Zones
+IST = ZoneInfo("Asia/Kolkata")
+ET = ZoneInfo("America/New_York")
+fmt = "%Y-%m-%d %I:%M:%S %p %Z"
+# 2. Start Time (No Microseconds)
+start_ist = datetime.now(IST).replace(microsecond=0)
+start_et = start_ist.astimezone(ET)
+print(f"\n🚀 All Prod Env URL's Checking started at {start_ist.strftime(fmt)}/{start_et.strftime(fmt)}")
+print("\nChecking URL's Status, Please Wait...")
+
+def get_status(url, custom_timeout=10):
+    """
+    Checks URL status mimicking Microsoft Edge InPrivate mode.
+    """
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 Edg/122.0.0.0",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache"
     }
 
-    # 3. Display Menu
-    print("\n--- Select Action ---")
-    for key, (slug, label) in actions.items():
-        print(f"{key}. {label}")
-
-    choice = recorded_input(f"Enter choice ({', '.join(actions.keys())}): ").strip()
-
-    # 4. Process Choice
-    if choice in actions:
-        action_key, display_text = actions[choice]
-        print(f"\nProceeding with automation of {display_text} on DEV1 Environment\n")
-        return action_key
-    
-    print("\nInvalid selection. Exiting.")
-    sys.exit(0)
-
-# --- LOGGER SETUP ---
-class EmailLogger(object):
-    def __init__(self):
-        self.terminal = sys.stdout
-        self.log = io.StringIO()
-
-    def write(self, message):
-        self.terminal.write(message)
-        self.log.write(message)
-
-    def flush(self):
-        self.terminal.flush()
-
-    def get_log(self):
-        return self.log.getvalue()
-
-# Initialize the logger
-logger = EmailLogger()
-sys.stdout = logger
-
-def recorded_input(prompt):
-    """Replacement for input() that records the response in the log."""
-    user_choice = input(prompt)
-    # Manually write the user's response to the log since input() doesn't
-    print(f" [USER INPUT]: {user_choice}") 
-    return user_choice
-
-# 1. Helper function to strip ANSI color codes
-def strip_ansi_codes(text):
-    """Removes ANSI escape sequences (colors, formatting) from a string."""
-    ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-    return ansi_escape.sub('', text)
-
-# --- Configuration Setup ---
-# Credentials
-USERNAME = "an453200ad"
-PASSWORD = "ZUquV4Y7dsp8TK#W-uXB"
-SERVERS = {
-    "server1-dc04dlvpeg318": {"host": "dc04dlvpeg318", "user": USERNAME, "pass": PASSWORD},
-    "server2-dc04dlvpeg319": {"host": "dc04dlvpeg319", "user": USERNAME, "pass": PASSWORD}
-}
-kafkahostedservers = {
-    "server2-dc04dlvpeg319": {"host": "dc04dlvpeg319", "user": USERNAME, "pass": PASSWORD}
-}
-SERVICE_USER = "srplmsps"
-TOMCAT_PATH = "/apps/tomcatService"
-
-# 2. Global Function Definition (Available to everything below)
-def create_ssh_connection(server_name, server_data):
-    print(f"Connecting to {server_name}...")
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     try:
-        client.connect(
-            hostname=server_data["host"], 
-            username=server_data["user"], 
-            password=server_data["pass"]
-        )
-        return client
-    except Exception as e:
-        print(f"Error: {e}")
-        return None
-
-# Mapping for URL polling
-JVM_URLS = {
-    "WebUserNode_dc04dlvpeg319:8443": "https://dc04dlvpeg319.wellpoint.com:8443/prweb/PRServlet/",
-    "WebUserNode_dc04dlvpeg318:8443": "https://dc04dlvpeg318.wellpoint.com:8443/prweb/PRServlet/",
-    "WebUserNode_dc04dlvpeg318:8444": "https://dc04dlvpeg318.wellpoint.com:8444/prweb/PRServlet/",
-    "BackgroundProcessing,BIX,Stream,Search,AgentRun1BGNode,AgentRun2BGNodes,AgentRun3BGNodes_dc04dlvpeg319:8444": "https://dc04dlvpeg319.wellpoint.com:8444/prweb/PRServlet/"
-}
-
-#Checking URL's Status at the Start and at the End of Script
-CHECK_URLS = [
-    "https://sps.upgradedev1.elevancehealth.com/prweb/",
-    "https://dc04dlvpeg319.wellpoint.com:8443/prweb/PRServlet/",
-    "https://dc04dlvpeg318.wellpoint.com:8443/prweb/PRServlet/",
-    "https://dc04dlvpeg318.wellpoint.com:8444/prweb/PRServlet/",
-    "https://dc04dlvpeg319.wellpoint.com:8444/prweb/PRServlet/"
-]
-
-# Define WebUser Node details
-webuser_nodes = [
-    {"url": "https://dc04dlvpeg319.wellpoint.com:8443/prweb/PRServlet/", "name": "WebUserNode_dc04dlvpeg319:8443"},
-    {"url": "https://dc04dlvpeg318.wellpoint.com:8443/prweb/PRServlet/", "name": "WebUserNode_dc04dlvpeg318:8443"},
-    {"url": "https://dc04dlvpeg318.wellpoint.com:8444/prweb/PRServlet/", "name": "WebUserNode_dc04dlvpeg318:8444"}
-]
-
-def run_remote_cmd(ssh_client, command):
-    # Use getpeername once; resolve hostname only if needed for logging
-    ip_address = ssh_client.get_transport().getpeername()[0]
-    try:
-        # This looks up the hostname associated with the IP
-        host = socket.gethostbyaddr(ip_address)[0]
-    except (socket.herror, socket.gaierror):
-        # Fallback to IP if DNS lookup fails
-        host = ip_address
-    print(f"\n[RUNNING ON Server {host}]: {command}")
-
-    # Request a PTY to combine stdout/stderr and maintain order
-    stdin, stdout, stderr = ssh_client.exec_command(command, get_pty=True)
-    stdin.close() # Close stdin if you aren't sending interactive input
-
-    full_output = []
-    # readline() on a PTY-enabled channel is generally safe for real-time
-    for line in iter(stdout.readline, ""):
-        line_content = line.strip()
-        if line_content:
-            print(f"  {line_content}")
-            full_output.append(line_content)
-
-    # Capture the actual exit code from the remote process
-    exit_status = stdout.channel.recv_exit_status()
-    if exit_status != 0:
-        print(f"  [ERROR]: Command failed with exit code {exit_status}")
-
-    return "\n".join(full_output)
-
-# 2. Excecute Commands through Service User Function Definition (Available to everything below)
-def execute_service_commands(host, user, pwd, service_user, command):
-    """Connects to host and runs commands as the specified service user."""
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    
-    try:
-        client.connect(host, username=user, password=pwd, timeout=10)
-        
-        # Use [invoke_shell] for interactive sudo su - 
-        shell = client.invoke_shell()
-
-        # Clear initial banners
-        time.sleep(2) 
-        if shell.recv_ready():
-            shell.recv(10000)
-
-        # 1. Transition to the service user
-        shell.send(f"sudo su - {service_user}\n")
-
-        # Clear transition banners/prompts
-        time.sleep(2) 
-        if shell.recv_ready():
-            shell.recv(10000)
-
-        # Execute the specific Tomcat command
-        shell.send(f"{command}\n")
-        
-        # Give the command time to execute and return output
-        time.sleep(2) 
-        
-        output = ""
-        if shell.recv_ready():
-            # [recv]() returns available data in the buffer
-            output = shell.recv(10000).decode('utf-8')
-        
-        return {command: output}
-
-    except Exception as e:
-        return {"Error": str(e)}
-    finally:
-        client.close()
-
-def stopping_wait_for_webusernodeurl_status(url, jvm_name, timeout=30):
-    """Verifying the WebUser Node JVMs & their URL status with a retry loop."""
-    print(f"\n--- Checking {jvm_name} status and its Node URL {url} status ---")
-    start_time = time.time()
-    
-    while time.time() - start_time < timeout:
-        try:
-            response = requests.get(url, timeout=10, verify=False)
-            if response.status_code != 200:
-                print(f"SUCCESS: {jvm_name} returned with Status Code as {response.status_code}, WebUser Node is down!")
-                return True
-        except requests.exceptions.RequestException:
-            # Log failure but continue looping until timeout
-            print(f"SUCCESS: {jvm_name} connection refused. It is down!")
-        
-        time.sleep(5)  # Wait between retries
-    
-    # Only returns False if the entire 'timeout' duration passes without a 200 OK
-    print(f"[FAILURE]: {jvm_name} is still Up and Running, returning 200 OK after {timeout}s.")
-    return False
-
-def stopping_wait_for_streamnodeurl_status(url, jvm_name, timeout=30):
-    """Verifying the JVM & the URL status with a retry loop."""
-    print(f"--- Checking {jvm_name} status and its Node URL {url} status ---")
-    start_time = time.time()
-    
-    while time.time() - start_time < timeout:
-        try:
-            response = requests.get(url, timeout=10, verify=False)
-            if response.status_code == 200:
-                print(f"SUCCESS: {jvm_name} returned with Status Code as {response.status_code} i.e BackgroundProcessing,BIX,Stream,Search,AgentRun1BGNode,AgentRun2BGNodes,AgentRun3BGNodes is down!")
-                return True
-        except requests.exceptions.RequestException:
-            # Log failure but continue looping until timeout
-            print(f"SUCCESS: {jvm_name} connection refused. It is down!")
-        
-        time.sleep(5)  # Wait between retries
-    
-    # Only returns False if the entire 'timeout' duration passes without a 200 OK
-    print(f"\nFAILURE: {jvm_name} is still returning 200 OK after {timeout}s.")
-    return False
-
-def verify_kafka_status(ssh_client, server_name):
-    """
-    Verifies the Kafka JVM process Status on the specified server.
-    Returns the PID if running, or None if already down.
-    """
-    print(f"\n--- Verifying Kafka Status on {server_name} Before Stopping the BackgroundProcessing,BIX,Stream,Search,AgentRun1BGNode,AgentRun2BGNodes,AgentRun3BGNodes ---")
-
-    # Use pgrep -f to find processes matching the specific Kafka path
-    # This is more robust than manual grep + awk piping 
-    search_cmd = "pgrep -f '/apps/tomcat9/kafka'"
-
-    # Run command without sudo to check for process existence        
-    output = run_remote_cmd(ssh_client, search_cmd)
-    
-    # 1. Check if output is empty or whitespace(Process is already down)
-    if not output or not output.strip():
-        print(f"INFO: Kafka JVM is already down on {server_name}. No action needed.")
-        return None
-    
-    # 2. Process is running If we got a result, it's likely the PID of the still-running process
-    pid = output.strip()
-    
-    # Validation: Ensure the PID is actually numeric before returning
-    if pid.isdigit():
-        print(f"CHECK: Kafka Process running with (PID: {pid}) before stopping the BackgroundProcessing,BIX,Stream,Search,AgentRun1BGNode,AgentRun2BGNodes,AgentRun3BGNodes")
-        return pid
-    else:
-        print(f"WARNING: Unexpected output from pgrep: {pid}")
-        return None
-
-def kill_and_verify_kafka(server_name, info, SERVICE_USER):
-    """Reliably finds and kills Kafka processes ONLY on the specified server."""
-    print(f"\n--- Processing Kafka on {server_name} ---")
-    
-    # The [k] prevents grep from finding itself in the process list
-    search_cmd = "ps -ef | grep '/apps/tomcat9/[k]afka' | awk '{print $2}'"
-    
-    # 1. Search for PIDs
-    result = execute_service_commands(
-        info["host"], 
-        info["user"], 
-        info["pass"], 
-        SERVICE_USER,
-        search_cmd
-    )
-    
-    # Extract string output from the dictionary returned by the function
-    output = result.get(search_cmd, "")
-
-    if output.strip():
-        pids = output.splitlines()
-        for pid in pids:
-            pid = pid.strip()
-            if pid.isdigit():
-                print(f"Force killing Kafka PID: {pid} on {server_name}")
-                # Execute the actual kill command
-                execute_service_commands(
-                   info["host"], 
-                   info["user"], 
-                   info["pass"], 
-                   SERVICE_USER,
-                   f"kill -l" #kill -9 {pid}
-                )
-        time.sleep(2)
-    else:
-        print(f"No active Kafka processes found on {server_name}.")
-
-    # 2. Final verification 
-    # Switched to execute_service_commands to check kafka process using service user
-    verify_result = execute_service_commands(
-        info["host"], 
-        info["user"], 
-        info["pass"], 
-        SERVICE_USER,
-        search_cmd
-    )
-    verify_output = verify_result.get(search_cmd, "").strip()
-
-    if not verify_output:
-        print(f"VERIFIED: Kafka is cleared on {server_name}.\n")
-        return True
-    else:
-        print(f"CRITICAL: Kafka still detected on {server_name}! PIDs: {verify_output}\n")
-        return False
-
-def stopping_check_jvms_status(label, ssh1, ssh2):
-    print("\n" + "="*72)
-    print(f"--- {label} ---")
-    print("="*72)
-
-    # Iterating through both passed connections
-    for name, conn in [("dc04dlvpeg318", ssh1), ("dc04dlvpeg319", ssh2)]:
-        try:
-            print(f"\n--- Checking JVM Status on {name} ---")
-            
-            # Execute command using the passed connection 'conn'
-            tomcat_processes = run_remote_cmd(conn, "ps -ef | grep tomcat | grep -v grep")
-
-            if tomcat_processes and tomcat_processes.strip():
-                # Print the actual output returned from the server
-                print(f"JVM's are Running")
-            else:
-                print(f"WARNING: No Tomcat processes found on {name}!")
-                          
-        except Exception as e:
-            # Printing the specific error 'e' is critical for debugging SSH issues
-            print(f"An Error Occurred on {name}: {str(e)}")
-
-def stopping_check_all_webusers():
-    """Returns True only if ALL nodes are successfully reachable"""
-    all_up = False 
-    for node in webuser_nodes:
-        # If any single node fails, the 'all_up' status becomes False
-        if not stopping_wait_for_webusernodeurl_status(node['url'], node['name']):
-            all_up = True
-    return all_up
-
-def stop_webuser_bundle(SERVERS, TOMCAT_PATH, SERVICE_USER):
-    print("\n[INFO] Stopping WebUser Nodes...")
-    # Execute Stop Commands for WebUser Nodes
-    # Define the specific nodes and their respective jvms
-    webuser_targets = [
-        ("dc04dlvpeg319", "tomcat-01"),
-        ("dc04dlvpeg318", "tomcat-01"),
-        ("dc04dlvpeg318", "tomcat-02")
-    ]
-
-    for host_key, jvmname in webuser_targets:
-        # Find the full key that contains the hostname (e.g., 'server1-dc04dlvpeg318')
-        matched_key = next((k for k in SERVERS if host_key in k), None)
-        if matched_key:
-            info = SERVERS[matched_key]
-            print("\n" + "="*50)
-            print(f"PROCESSING ON SERVER {host_key}: {jvmname} JVM")
-            print("="*50)
-
-            # Define the specific startup/status command
-            target_command = f"{TOMCAT_PATH}/{jvmname} status" #stop
-
-            # Execute using the full credential set from the loop logic
-            outputs = execute_service_commands(
-                info["host"], 
-                info["user"], 
-                info["pass"], 
-                SERVICE_USER,
-                target_command
+        # No-verify and fresh session mimics InPrivate behavior
+        with requests.Session() as session:
+            response = session.get(
+                url, 
+                headers=headers, 
+                timeout=custom_timeout, 
+                allow_redirects=True, 
+                verify=False
             )
-        
-            for cmd_name, out in outputs.items():
-                # Apply the helper function to the output before printing
-                clean_output = strip_ansi_codes(out)
-                print(f"{clean_output}")
-        else:
-            print(f"[WARN] Server key {host_key} not found in SERVERS configuration.")
+            status_code = response.status_code
+            style_base = "font-weight: bold; text-align: center;"
 
-    print("\n[SUCCESS] Stopped Below WebUser Nodes:")
-    print("dc04dlvpeg319:8443\ndc04dlvpeg318:8443\ndc04dlvpeg318:8444")
-
-def check_url_status(label):
-    print(f"\n---- {label} ----\n")
-    for url in CHECK_URLS:
-        response = None  # Initialize to None at the start of each loop
-        try:
-            response = requests.get(url, timeout=10, verify=False)
-            response.raise_for_status() # Optional: triggers except block for 4xx/5xx errors
-            print(f"✅URL: {url} | Status Code: {response.status_code} | Status: Up and Running")
-        except Exception as e:
-            # Check if response exists; if not, report the connection error instead
-            status_info = response.status_code if response else "No Response"
-            print(f"❌URL: {url} | Status Code: {status_info} | Status: Down or Unreachable")
-
-# --- EMAIL FUNCTION ---
-def stopping_send_outlook_report(content, start_et, end_et, fmt, duration_str):
-    try:
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        outlook = win32.Dispatch('outlook.application')
-        mail = outlook.CreateItem(0)
-        mail.To = 'venkatesh.sure@carelon.com'
-        mail.Subject = f'Testing Script - DEV1 Environment Stopping JVMs Shutdown Report - {timestamp}'
-
-        # HTML formatting to keep the console look        
-        mail.HTMLBody = f"""
-        <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
-            <h2 style="color: #2b579a;">Script Execution Log in Servers</h2>
-            <p><strong>Run Date:</strong> {timestamp}</p>
-            <hr>
-            <div style="background-color: #f4f4f4; padding: 15px; border: 1px solid #ddd; border-radius: 5px;">
-                <pre style="font-family: 'Consolas', 'Courier New', monospace; white-space: pre-wrap; word-wrap: break-word; word-break: break-all;">{content}</pre>
-            </div>
-        </div>
-        """
-        mail.Send()
-        print("\n>>> Email report dispatched successfully.")
-    except Exception as e:
-        # We use sys.__stdout__ here to ensure the error prints even if logging fails
-        sys.__stdout__.write(f"\nFAILED TO SEND EMAIL: {e}\n")
-
-def main():
-
-    # 1. SETUP OUTPUT CAPTURE
-    output_buffer = io.StringIO()
-    # Save the original stdout so we can print to the screen and the buffer
-    original_stdout = sys.stdout 
-
-    # 2. Custom writer to print to BOTH console and the buffer
-    class Logger(object):
-        def write(self, data):
-            original_stdout.write(data)
-            output_buffer.write(data)
-        def flush(self):
-            original_stdout.flush()
-
-    sys.stdout = Logger()
-
-    # 3. Password Confirmation
-    pre_flight_check()
-
-    try:
-        from zoneinfo import ZoneInfo
-    except ImportError:
-        import pytz as ZoneInfo # Fallback for older versions
-    # 1. Configuration: Set Time Zones
-    IST = ZoneInfo("Asia/Kolkata")
-    ET = ZoneInfo("America/New_York")
-    fmt = "%Y-%m-%d %I:%M:%S %p %Z"
-    # 2. Start Time (No Microseconds)
-    start_ist = datetime.now(IST).replace(microsecond=0)
-    start_et = start_ist.astimezone(ET)
-    print(f"\n🚀 JVM's Stop Execution started at {start_ist.strftime(fmt)} / {start_et.strftime(fmt)}")
-
-    try:
-        # 4. Setup Connections
-        # Server 1
-        ssh1 = paramiko.SSHClient()
-        ssh1.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        ssh1.connect(SERVERS["server1-dc04dlvpeg318"]["host"], 
-                     username=SERVERS["server1-dc04dlvpeg318"]["user"], 
-                     password=SERVERS["server1-dc04dlvpeg318"]["pass"])
-        print("Connection to server1 dc04dlvpeg318 was successful")
-        
-        # Server 2
-        ssh2 = paramiko.SSHClient()
-        ssh2.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        ssh2.connect(SERVERS["server2-dc04dlvpeg319"]["host"], 
-                     username=SERVERS["server2-dc04dlvpeg319"]["user"], 
-                     password=SERVERS["server2-dc04dlvpeg319"]["pass"])
-        print("Connection to server2 dc04dlvpeg319 was successful")
-
-        # 5. Verifying JVM's Status Before Stopping the JVM's
-        stopping_check_jvms_status("Verfiying Running Tomcat JVM's Status in Servers before Stopping", ssh1, ssh2)
-
-        # 6. Verifying URL's Status Before Stopping the JVM's
-        check_url_status("Verifying URL's Status Health Check Details Before Stopping the JVM's")
-        print("\n")
-
-        # 4. Check Current Status for WebUser Nodes
-        print(f"Checking status of Webuser Node URLs Status...")
-
-        if stopping_check_all_webusers():
-            print("WebUser Nodes are Stopped")
-        else:
-            print("All WebUser Nodes are not stopped. Attempting stop sequence...")
-            print("\nWebUser Nodes are Up and Running, So Proceeding to Stop them...")
-            stop_webuser_bundle(SERVERS, TOMCAT_PATH, SERVICE_USER)
-            print("Waiting 2 mins for WebUser Node URL's to be completely Stopped...")
-            time.sleep(120)
-            countdown_and_run(30) # Reduced from 300 for testing as per your comment
-
-        # 3. Map JVMs to SSH connections
-        print("\nVerification Loop Started for WebUser Nodes:\n - dc04dlvpeg319:8443\n - dc04dlvpeg318:8443\n - dc04dlvpeg318:8444\n")
-
-        # Target mapping: (ssh_obj, pgrep_pattern, display_name, server_info)
-        jvm_targets = [
-            (ssh2, "tomcat-01", "dc04dlvpeg319-8443", SERVERS[0]), 
-            (ssh1, "tomcat-01", "dc04dlvpeg318-8443", SERVERS[1]),
-            (ssh1, "tomcat-02", "dc04dlvpeg318-8444", SERVERS[1])
-        ]
-
-        attempts = 0
-        max_attempts = 3
-        all_stopped = False
-        still_running = []
-
-        while attempts < max_attempts:
-            still_running = []
-            attempts += 1
-            print(f"\n[Attempt {attempts}/{max_attempts}] Checking and stopping JVMs...")
-
-            for ssh, pattern, name, info in jvm_targets:
-                try:
-                    # Check if process exists
-                    raw_pid = run_remote_cmd(ssh, f"pgrep -f {pattern}").strip()
+            if status_code == 200:
+                status_msg = f'<div style="color: green; {style_base}">UP and Running</div>'
             
-                    if raw_pid:
-                        print(f"Node {name} is still running (PID: {raw_pid}). Sending stop command...")
-                        stop_cmd = f"{TOMCAT_PATH}/{pattern} status" #stop
-                
-                        stop_results = execute_service_commands(
-                            info["host"], info["user"], info["pass"], SERVICE_USER, stop_cmd
-                        )
-
-                        for s_cmd, raw_out in stop_results.items():
-                            clean_out = strip_ansi_codes(raw_out)
-                            print(f"--- Stop Result ({name}) ---\n{clean_out}")
-                
-                        # Re-verify after stop command
-                        raw_pid_verify = run_remote_cmd(ssh, f"pgrep -f {pattern}").strip()
-                        if raw_pid_verify:
-                            still_running.append(f"{name} (PIDs: {raw_pid_verify})")
-                    else:
-                        print(f"[SUCCESS] {name} is already stopped.")
-
-                except Exception as e:
-                    print(f"Error processing {name}: {e}")
-
-            if not still_running:
-                print(f"\nSUCCESS: All Webuser JVMs have fully stopped.")
-                all_stopped = True
-                break
-    
-            if attempts < max_attempts:
-                print(f"Waiting 10 seconds before next retry...")
-                time.sleep(10)
-
-        if not all_stopped:
-            print("\n" + "!"*60)
-            print("CRITICAL: Manual intervention required! Nodes failed to stop:")
-            for item in still_running:
-                print(f" >> {item}")
-            print("!"*60 + "\n")
-
-        # 4. URL Polling Verification
-        jvm_checks = [
-            (JVM_URLS["WebUserNode_dc04dlvpeg319:8443"], "WebUserNode_dc04dlvpeg319:8443"),
-            (JVM_URLS["WebUserNode_dc04dlvpeg318:8443"], "WebUserNode_dc04dlvpeg318:8443"),
-            (JVM_URLS["WebUserNode_dc04dlvpeg318:8444"], "WebUserNode_dc04dlvpeg318:8444")
-        ]
-
-        for url, name in jvm_checks:
-            if not wait_for_jvm_url_stop(url, name):
-                print(f"\nABORTING: {name} URL is still responding. Skipping Stream Node cleanup.")
-                return 
-
-        # 7. Stop Stream Node
-        print(f"\n[SUCCESS] Webuser Nodes Down. Handling Stream/Background Nodes...")
-
-        for server_key, info in kafkahostedservers.items():       
-            status_cmd = f"{TOMCAT_PATH}/tomcat-02 status"
-            status_outputs = execute_service_commands(
-                info["host"], info["user"], info["pass"], SERVICE_USER, status_cmd
-            )
-
-            for cmd_name, raw_out in status_outputs.items():
-                out = strip_ansi_codes(raw_out).lower()
-        
-                if "running" in out:
-                    print(f"Stream Node on {info['host']} is UP. Stopping now...")
-                    stop_cmd = f"{TOMCAT_PATH}/tomcat-02 status" #stop
-                    execute_service_commands(
-                        info["host"], info["user"], info["pass"], SERVICE_USER, stop_cmd
+            elif status_code == 404:
+                # Logic: Check for Node/JVM environment or a specific URL pattern
+                if "Node" in url.upper():
+                    status_msg = (
+                        '<div style="color: green; font-weight: bold; text-align:center;">JVM UP</div>'
+                        '<div style="color: red; font-weight: bold; text-align:center;">'
+                        'but URL was DOWN<br>Context Root Not Found'
+                        '</div>'
                     )
                 else:
-                    print(f"[SUCCESS] Stream Node already stopped on {info['host']}.")
+                    # Logic for standard F5
+                    status_msg = (
+                        '<div style="color: red; font-weight: bold; text-align:center;">'
+                        'URL was DOWN<br>Context Root Not Found'
+                        '</div>'
+                    )
+            
+            # Logic for other error codes (500, 403, etc.)
+            elif status_code in [500, 403, 503]:
+                status_msg = (
+                    f'<div style="color: red; {style_base}">'
+                    f'DOWN ({status_code})<br>Service Unavailable'
+                    f'</div>'
+                )           
+            
+            else:
+                status_msg = f'<div style="color: orange; {style_base}">Status: {status_code}</div>'
+            
+            return status_code, status_msg
 
-        print(f"Waiting 30 seconds for Stream Node cleanup...")
-        countdown_and_run(30)
-
-        # 7. Final JVM's Status
-        # Give time for JVMs to initialize before checking
-        print("Waiting 30 seconds for processes to settle...")
-        time.sleep(30)
-        stopping_check_jvms_status("Final Status Check on Tomcat Running JVM's in Servers", ssh1, ssh2)
-        
-        # 8. Final URL's Status
-        check_url_status("Final URL Status Health Check")
-
+    except requests.exceptions.ConnectionError:
+        return "FAILED", "This site can’t be reached\nURL Refused to connect"
+    except requests.exceptions.Timeout:
+        return "TIMEOUT", "Server Timeout"
     except Exception as e:
-        print(f"\nAn error occurred during execution: {e}")
-    finally:
-        ssh1.close()
-        ssh2.close()
+        return "ERROR", str(e)
 
-        # 2. End Time (No Microseconds) & Duration Calculation in Hours, Minutes, and Seconds
-        end_ist = datetime.now(IST).replace(microsecond=0)
-        end_et = end_ist.astimezone(ET)
-        duration = end_ist - start_ist
-        total_seconds = int(duration.total_seconds())
-        # Breaking down total seconds
-        hours, remainder = divmod(total_seconds, 3600)
-        minutes, seconds = divmod(remainder, 60)
-        duration_str = f"{hours}h {minutes}m {seconds}s"
-        print(f"\n🏁 JVM's Stop Execution Finished at: {end_ist.strftime(fmt)}/{end_et.strftime(fmt)}")
-        print(f"\n⏱️ JVM's Stop and its URL's Status Health Check Verification Duration: {duration_str}")
-        print(f"\nConnections to servers dc04dlvpeg318,dc04dlvpeg319 was closed")
 
-        # 2. EXTRACT LOG AND SEND EMAIL
-        log_content = output_buffer.getvalue()
-        sys.stdout = original_stdout # Restore original stdout       
+def send_outlook_mail(results):
+    """Sends the formatted results via Outlook Desktop App"""
+    print("\n")
+    print("Drafting Outlook email")
+    now = datetime.now()
+    hour = now.hour
+    shift = "S1" if 6 <= hour < 15 else "S2" if 15 <= hour < 23 else "S3"
+    date_today = now.strftime("%d %B %Y")
 
-    stopping_send_outlook_report(log_content, start_et, end_et, fmt, duration_str)
+    outlook = win32.Dispatch('outlook.application')
+    mail = outlook.CreateItem(0)
+    mail.To = 'Venkatesh.Sure@carelon.com' # Update with actual recipient
+    #mail.To = 'Dl-Sushant_Singh_All associates <Dl-Sushant_Singh_All_associates@legatohealth.com>' # Update with actual recipient
+    #mail.CC = 'Singh, Sushant <Sushant.Singh@carelon.com>'
+    mail.Subject = f'[SPS Monitoring Report] - PROD Environment Post Release URLs Health Check Report - {shift} - {date_today}'  
+    # Building the HTML Table for the email body
+    table_rows = ""
+    for res in results:
+        color = "green" if res['URLStatus'] == "UP and Running" else "red"
+        table_rows += f"""
+        <tr>
+            <td style="border:1px solid #ddd; padding:8px;">{res['Prod Env']}</td>
+            <td style="border:1px solid #ddd; padding:8px;">{res['F5 and Node URLs']}</td>
+            <td style="border:1px solid #ddd; padding:8px;">{res['StatusCode']}</td>
+            <td style="border:1px solid #ddd; padding:8px; color:{color}; font-weight:bold;">{res['URLStatus']}</td>
+        </tr>"""
 
-if __name__ == "__main__":
-    main()
+    mail.HTMLBody = f"""
+    <html>
+    <body>
+            <p>Hi Team,</p>
+            <p>Please find the below Production URL's Health Check report</p>
+	    <p>All Prod Env URL's Checking Started at <i>{start_et.strftime(fmt)}</i></p>         
+    <table style="border-collapse: collapse; width: 100%; font-family: Arial, sans-serif;">
+        <tr style="background-color: #f2f2f2;">
+            <th style="border:1px solid #ddd; padding:8px; text-align:left;">Prod Env</th>
+            <th style="border:1px solid #ddd; padding:8px; text-align:left;">F5 and Node URLs</th>
+            <th style="border:1px solid #ddd; padding:8px; text-align:left;">Status Code</th>
+            <th style="border:1px solid #ddd; padding:8px; text-align:center; width: 10px; overflow: hidden; text-overflow: ellipsis;">URL Status</th>
+        </tr>
+        {table_rows}
+    </table>
+    <p>
+       All Prod Env URL's Checking Finished at <i>{end_et.strftime(fmt)}</i><br>
+       All Prod Env URL's Status Health Check Verified within <i>{duration_str}</i>
+    </p>
+    <p><i>This is an automated report.</i></p>
+    <p>Regards,<br>Venkatesh Sure</p>
+    """
+    mail.Send()
+    print("Email sent successfully via Outlook.")
+
+# Categorized URLs
+environments_moretimout = {
+    "PEGA PDMAPP F5": [
+        "https://pdmapp.elevancehealth.com/prweb/"
+    ],
+    "PARES Core Service F5 URL": [
+        "https://paresspsservices.anthem.com/spsservices"
+    ],
+}
+
+environments = {
+    "PEGA SPS F5 Pool Status": [
+        "https://sps.elevancehealth.com/?f5poolstatus"
+    ],
+    "PEGA SPS F5": [
+        "https://sps.elevancehealth.com/prweb/",
+    ],
+    "PEGA SPS UTILITY F5 Pool Status": [
+        "https://spspegautility.elevancehealth.com/prweb/?f5poolstatus"
+    ],
+    "PEGA SPS UTILITY F5": [
+        "https://spspegautility.elevancehealth.com/prweb/"
+    ],
+    "PEGA Hazelcast": [
+        "https://va10plvpeg516.wellpoint.com:8443/prcluster_service/ClusterServiceHealthCheck",
+        "https://va10plvpeg517.wellpoint.com:8443/prcluster_service/ClusterServiceHealthCheck",
+        "https://va10plvpeg518.wellpoint.com:8443/prcluster_service/ClusterServiceHealthCheck"
+    ],
+    "PEGA Stream Node": [
+        "https://dc04plvpeg391.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04plvpeg393.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "PEGA Search Node": [
+        "https://dc04plvpeg391.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04plvpeg392.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "PEGA BackgroundProcessing,AgentRun3BGNodes": [
+        "https://dc04plvpeg393.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "PEGA BackgroundProcessing, AgentRun1BGNode": [
+        "https://dc04plvpeg392.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "PEGA BackgroundProcessing,BIX,AgentRun2BGNodes,AgentRun3BGNodes": [
+        "https://dc04plvpeg394.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "PEGA BackgroundProcessing,AgentRun2BGNodes,AgentRun3BGNodes": [
+        "https://dc04plvpeg394.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "PEGA PDM Node": [
+        "https://dc04plvpeg396.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04plvpeg396.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04plvpeg397.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04plvpeg397.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04plvpeg398.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04plvpeg398.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04plvpeg399.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04plvpeg399.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04plvpeg395.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04plvpeg395.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "PEGA WebUser Node": [
+        "https://dc04plvpeg400.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04plvpeg400.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04plvpeg401.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04plvpeg401.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04plvpeg402.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04plvpeg402.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04plvpeg403.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04plvpeg403.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04plvpeg404.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04plvpeg404.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04plvpeg405.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04plvpeg405.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "OEM": [
+        "https://oem.elevancehealth.com/em/faces/logon/core-uifwk-console-login"
+    ],
+    "Roster Automation F5 Pool Status": [
+        "https://providerrma.elevancehealth.com/?f5poolstatus"
+    ],
+    "Roster Automation F5": [
+        "https://providerrma.elevancehealth.com/app/dashboard"
+    ],
+    "Roster Automation Node URL": [
+        "https://dc04plvsps300.wellpoint.com:8998/app/dashboard",
+        "https://dc04plvsps301.wellpoint.com:8998/app/dashboard"
+    ],
+    "Prov360 F5 Pool Status": [
+        "https://services.provnexus.elevancehealth.com/?f5poolstatus"
+    ],
+    "SPS ProvRestore F5 Pool Status": [
+        "https://spsrestore.elevancehealth.com/?f5poolstatus"
+    ],
+    "SPS ProvRestore F5": [
+        "https://spsrestore.elevancehealth.com/"
+    ],
+    "SPS Audit History F5 Pool Status": [
+        "https://spsaudithistory.elevancehealth.com/?f5poolstatus"
+    ],
+    "SPS Audit History F5": [
+        "https://spsaudithistory.elevancehealth.com/"
+    ],
+    "Prov360 F5 associated with va10plvwbs669": [
+        "https://provider360.anthem.com/pdsservices/admin/dashboard"
+    ],
+    "Prov360 F5 Pool Status for PDS Services associated with va10plvwbs669": [
+        "https://provider360.anthem.com/pdsservices/?f5poolstatus"
+    ],
+    "Prov360 Belonging to NETWORK AI": [
+        "https://netai.prov360prod.awsdns.internal.das/dashboard/"
+    ],
+    "PKM F5 Pool Status": [
+        "https://pdm-pkm.anthem.com/?f5poolstatus"
+    ],
+    "PKM Node URL": [
+        "https://dc04plvwbs371.wellpoint.com:25694/translationAdapter/testMe",
+        "https://dc04plvwbs371.wellpoint.com:25695/translationAdapter/testMe",
+        "https://dc04plvwbs371.wellpoint.com:25696/translationAdapter/testMe",
+        "https://dc04plvwbs372.wellpoint.com:25694/translationAdapter/testMe",
+        "https://dc04plvwbs372.wellpoint.com:25695/translationAdapter/testMe",
+        "https://dc04plvwbs372.wellpoint.com:25696/translationAdapter/testMe",
+        "https://dc04plvwbs373.wellpoint.com:25694/translationAdapter/testMe",
+        "https://dc04plvwbs373.wellpoint.com:25695/translationAdapter/testMe",
+        "https://dc04plvwbs373.wellpoint.com:25696/translationAdapter/testMe",
+        "https://dc04plvwbs374.wellpoint.com:25694/translationAdapter/testMe",
+        "https://dc04plvwbs374.wellpoint.com:25695/translationAdapter/testMe",
+        "https://dc04plvwbs374.wellpoint.com:25696/translationAdapter/testMe"
+    ],
+    "MATCH SERVER Inspector URL": [
+        "https://va10plvwbs687.wellpoint.com:10047/inspector/common/login.ihtml",
+        "https://va10plvwbs688.wellpoint.com:10047/inspector/common/login.ihtml"
+    ],
+    "MATCH SERVER Console URL": [
+        "https://va10plvwbs687.wellpoint.com:10002/ibm/console/logon.jsp",
+        "https://va10plvwbs688.wellpoint.com:10002/ibm/console/logon.jsp"
+    ],
+    "SPS Core Service F5 Pool Status": [
+        "https://spsservices.anthem.com/?f5poolstatus"
+    ],
+    "SPS Core Service F5": [
+        "https://spsservices.anthem.com/spsservices"
+    ],
+    "SPS Core Service Node URL": [
+        "https://va10plvwbs628.wellpoint.com:25694/spsservices",
+        "https://va10plvwbs629.wellpoint.com:25694/spsservices",
+        "https://va10plvwbs629.wellpoint.com:25695/spsservices",
+        "https://va10plvwbs630.wellpoint.com:25694/spsservices",
+        "https://va10plvwbs630.wellpoint.com:25695/spsservices",
+        "https://va10plvwbs744.wellpoint.com:25694/spsservices",
+        "https://va10plvwbs744.wellpoint.com:25695/spsservices",
+        "https://va10plvwbs744.wellpoint.com:25696/spsservices",
+        "https://va10plvwbs745.wellpoint.com:25694/spsservices",
+        "https://va10plvwbs745.wellpoint.com:25695/spsservices",
+        "https://va10plvwbs745.wellpoint.com:25696/spsservices",
+        "https://va10plvwbs746.wellpoint.com:25694/spsservices",
+        "https://va10plvwbs747.wellpoint.com:25694/spsservices",
+        "https://va10plvwbs747.wellpoint.com:25695/spsservices",
+        "https://va10plvwbs747.wellpoint.com:25696/spsservices",
+        "https://va10plvwbs748.wellpoint.com:25694/spsservices",
+        "https://va10plvwbs748.wellpoint.com:25695/spsservices",
+        "https://va10plvwbs748.wellpoint.com:25696/spsservices",
+        "https://va10plvwbs749.wellpoint.com:25694/spsservices",
+        "https://va10plvwbs749.wellpoint.com:25695/spsservices",
+        "https://va10plvwbs749.wellpoint.com:25696/spsservices",
+        "https://va10plvwbs750.wellpoint.com:25694/spsservices",
+        "https://va10plvwbs750.wellpoint.com:25695/spsservices",
+        "https://va10plvwbs750.wellpoint.com:25696/spsservices",
+        "https://va10plvwbs751.wellpoint.com:25694/spsservices",
+        "https://va10plvwbs751.wellpoint.com:25695/spsservices",
+        "https://va10plvwbs751.wellpoint.com:25696/spsservices",
+        "https://va10plvwbs752.wellpoint.com:25694/spsservices",
+        "https://va10plvwbs752.wellpoint.com:25695/spsservices",
+        "https://va10plvwbs752.wellpoint.com:25696/spsservices"
+    ],
+    "PARES Core Service F5 Pool Status": [
+        "https://paresspsservices.anthem.com/?f5poolstatus"
+    ],
+    "PARES Core Service Node URL": [
+        "https://va10plvwbs628.wellpoint.com:25695/spsservices",
+        "https://va10plvwbs628.wellpoint.com:25696/spsservices",
+        "https://va10plvwbs746.wellpoint.com:25695/spsservices",
+        "https://va10plvwbs746.wellpoint.com:25696/spsservices"
+    ],
+    "UIX Core Service F5 Pool Status": [
+        "https://spsuixservices.anthem.com/?f5poolstatus"
+    ],
+    "UIX Core Service F5": [
+        "https://spsuixservices.anthem.com/spsservices"
+    ],
+    "UIX Core Service Node URL": [
+        "https://va10plvwbs629.wellpoint.com:25696/spsservices",
+        "https://va10plvwbs630.wellpoint.com:25696/spsservices"
+    ],
+    "UIX PDM F5 Pool Status": [
+        "https://pdm-uix.anthem.com/?f5poolstatus"
+    ],
+    "UIX PDM F5": [
+        "https://pdm-uix.anthem.com/",
+    ],
+    "SPSDARTUI F5 Pool Status": [
+        "https://spsdartui.anthem.com/?f5poolstatus"
+    ],
+    "SPSDARTUI F5": [
+        "https://spsdartui.anthem.com/"
+    ],
+    "PDT": [
+        "http://dc04plvcfe305:8070/pdt_fhir_nexus/appHealthCheck",
+        "http://dc04plvcfe305:8071/pdt_fhir_nexus/appHealthCheck",
+        "http://dc04plvcfe305:8072/pdt_fhir_nexus/appHealthCheck",
+        "http://dc04plvcfe305:8073/pdt_fhir_nexus/appHealthCheck",
+        "http://dc04plvcfe305:8074/pdt_fhir_nexus/appHealthCheck",
+        "http://dc04plvcfe305:8075/pdt_fhir_nexus/appHealthCheck",
+        "http://dc04plvcfe305:8076/pdt_fhir_nexus/appHealthCheck",
+        "http://dc04plvcfe305:8077/pdt_fhir_nexus/appHealthCheck",
+        "http://dc04plvcfe305:8078/pdt_fhir_nexus/appHealthCheck",
+        "http://dc04plvcfe305:8078/pdt_fhir_nexus/dashboard",
+        "http://dc04plvcfe305:8070/pdt_fhir_nexus/dashboard?Etl_load_ids=2299,2296"
+    ],
+    "BPD": [
+        "http://dc04plvcfe306.wellpoint.com:45699/bdd/config/findAll",
+        "http://dc04plvcfe306.wellpoint.com:45698/bdd/config/findAll",
+        "http://dc04plvcfe306.wellpoint.com:45697/bdd/config/findAll",
+        "http://dc04plvcfe306.wellpoint.com:35699/bdd/config/findAll",
+        "http://dc04plvcfe306.wellpoint.com:35696/bdd/config/findAll",
+        "http://dc04plvcfe306.wellpoint.com:35697/bdd/config/findAll",
+        "http://dc04plvcfe306.wellpoint.com:25699/bdd/config/findAll",
+        "http://dc04plvcfe306.wellpoint.com:25698/bdd/config/findAll",
+        "http://dc04plvcfe306.wellpoint.com:25697/bdd/config/findAll" 
+    ],
+    "F5 Portal": [
+        "https://f5portal.internal.das/vips"
+    ],
+    "PARESOld Node": [
+        "https://va10plvwbs669.wellpoint.com:10012/parespsservices",
+        "https://va10plvwbs669.wellpoint.com:10012/spsservices",
+        "https://va10plvwbs669.wellpoint.com:10013/parespsservices",
+        "https://va10plvwbs669.wellpoint.com:10013/spsservices",
+        "https://va10plvwbs669.wellpoint.com:10014/parespsservices",
+        "https://va10plvwbs669.wellpoint.com:10014/spsservices",
+        "https://va10plvwbs669.wellpoint.com:10015/parespsservices",
+        "https://va10plvwbs669.wellpoint.com:10015/spsservices",
+        "https://va10plvwbs669.wellpoint.com:10016/parespsservices",
+        "https://va10plvwbs669.wellpoint.com:10016/spsservices"
+    ],
+}
+
+# 1. Merge dictionaries safely (Python 3.9+)
+# This combines both into one master list for the loop
+# Run validation and collect results
+all_envs = environments_moretimout | environments
+tasks = []
+
+for env_name, url_list in all_envs.items():
+    for url in url_list:
+        timeout_val = 900 if url in environments_moretimout.get(env_name, []) else 10
+        tasks.append((env_name, url, timeout_val))
+print(f"🚀 Checking {len(tasks)} URLs in parallel...")
+
+# 2. Worker function for the thread
+def check_url(task):
+    env_name, url, timeout_val = task
+    code, status = get_status(url, timeout_val)
+    return {
+        'Prod Env': env_name, 
+        'F5 and Node URLs': url, 
+        'StatusCode': code, 
+        'URLStatus': status
+    }
+
+# Use ThreadPoolExecutor for I/O-bound URL checking and to Execute in parallel with RETRIEVE in order
+with ThreadPoolExecutor(max_workers=20) as executor:
+    # executor.map preserves the order of the input 'tasks'
+    all_results = list(executor.map(check_url, tasks))
+
+# 2. End Time (No Microseconds) & Duration Calculation in Hours, Minutes, and Seconds
+end_ist = datetime.now(IST).replace(microsecond=0)
+end_et = end_ist.astimezone(ET)
+duration = end_ist - start_ist
+total_seconds = int(duration.total_seconds())
+# Breaking down total seconds
+hours, remainder = divmod(total_seconds, 3600)
+minutes, seconds = divmod(remainder, 60)
+print(f"\n🏁 All Prod Env URL's Checking Finished at: {end_ist.strftime(fmt)}/{end_et.strftime(fmt)}")
+duration_str = f"{hours}h {minutes}m {seconds}s"
+print(f"\n⏱️ All Prod Env URL's Status Health Check Verification Duration: {duration_str}")
+
+# Send the email
+send_outlook_mail(all_results)
