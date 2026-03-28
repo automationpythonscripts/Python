@@ -103,7 +103,7 @@ def send_outlook_mail(results):
     mail.To = 'Venkatesh.Sure@carelon.com' # Update with actual recipient
     #mail.To = 'Dl-Sushant_Singh_All associates <Dl-Sushant_Singh_All_associates@legatohealth.com>' # Update with actual recipient
     #mail.CC = 'Singh, Sushant <Sushant.Singh@carelon.com>'
-    mail.Subject = f'[SPS Monitoring Report] - PROD Environment Post Release URLs Health Check Report - {shift} - {date_today}'  
+    mail.Subject = f'[SPS Monitoring Report] - PROD Environment URLs Health Check Report - {shift} - {date_today}'  
     # Building the HTML Table for the email body
     table_rows = ""
     for res in results:
@@ -112,7 +112,7 @@ def send_outlook_mail(results):
         <tr>
             <td style="border:1px solid #ddd; padding:8px;">{res['Prod Env']}</td>
             <td style="border:1px solid #ddd; padding:8px;">{res['F5 and Node URLs']}</td>
-            <td style="border:1px solid #ddd; padding:8px;">{res['StatusCode']}</td>
+            <td style="border:1px solid #ddd; padding:8px; text-align:center;">{res['StatusCode']}</td>
             <td style="border:1px solid #ddd; padding:8px; color:{color}; font-weight:bold;">{res['URLStatus']}</td>
         </tr>"""
 
@@ -243,15 +243,6 @@ environments = {
     "SPS Audit History F5": [
         "https://spsaudithistory.elevancehealth.com/"
     ],
-    "Prov360 F5 associated with va10plvwbs669": [
-        "https://provider360.anthem.com/pdsservices/admin/dashboard"
-    ],
-    "Prov360 F5 Pool Status for PDS <br> Services associated with va10plvwbs669": [
-        "https://provider360.anthem.com/pdsservices/?f5poolstatus"
-    ],
-    "Prov360 Belonging to NETWORK AI": [
-        "https://netai.prov360prod.awsdns.internal.das/dashboard/"
-    ],
     "PKM F5 Pool Status": [
         "https://pdm-pkm.anthem.com/?f5poolstatus"
     ],
@@ -346,6 +337,19 @@ environments = {
     "SPSDARTUI F5": [
         "https://spsdartui.anthem.com/"
     ],
+    "Provider360 PDS Services F5 Pool Status<br>associated with va10plvwbs669": [
+        "https://provider360.anthem.com/pdsservices/?f5poolstatus"
+    ],
+    "Provider360 PDS Services F5 <br>associated with va10plvwbs669": [
+        "https://provider360.anthem.com/pdsservices/"
+    ],
+    "Provider360 PDS Services Node URL": [
+        "https://va10plvwbs669.wellpoint.com:10017/pdsservices",
+        "https://va10plvwbs669.wellpoint.com:10018/pdsservices",
+    ],
+    "NETWORKAIprov360": [
+        "https://netai.prov360prod.awsdns.internal.das/dashboard/"
+    ],
     "PDT": [
         "http://dc04plvcfe305:8070/pdt_fhir_nexus/appHealthCheck",
         "http://dc04plvcfe305:8071/pdt_fhir_nexus/appHealthCheck",
@@ -387,6 +391,61 @@ environments = {
     ],
 }
 
+
+# 1. Define the desired order of keywords/categories
+# Add or reorder this list based on your exact preference
+preferred_order = [
+    "PEGA SPS F5 Pool Status",
+    "PEGA SPS F5",
+    "PEGA SPS UTILITY F5 Pool Status",
+    "PEGA SPS UTILITY F5",
+    "PEGA PDMAPP F5",
+    "PEGA Hazelcast",
+    "PEGA Stream Node",
+    "PEGA Search Node",
+    "PEGA BackgroundProcessing,AgentRun3BGNodes",
+    "PEGA BackgroundProcessing, AgentRun1BGNode",
+    "PEGA BackgroundProcessing,BIX,<br>AgentRun2BGNodes,AgentRun3BGNodes",
+    "PEGA BackgroundProcessing,<br>AgentRun2BGNodes,AgentRun3BGNodes",
+    "PEGA PDM Node",
+    "PEGA WebUser Node",
+    "SPS Core Service F5 Pool Status",
+    "SPS Core Service F5",
+    "SPS Core Service Node URL",
+    "PARES Core Service F5 Pool Status",
+    "PARES Core Service F5 URL",
+    "PARES Core Service Node URL",
+    "UIX Core Service F5 Pool Status",
+    "UIX Core Service F5",
+    "UIX Core Service Node URL",
+    "UIX PDM F5 Pool Status",
+    "UIX PDM F5",
+    "Provider360 PDS Services F5 Pool Status<br>associated with va10plvwbs669"
+    "Provider360 PDS Services F5 <br>associated with va10plvwbs669",
+    "Provider360 PDS Services Node URL",
+    "SPSDARTUI F5 Pool Status",
+    "SPSDARTUI F5",
+    "PKM F5 Pool Status",
+    "PKM Node URL",
+    "Roster Automation F5 Pool Status",
+    "Roster Automation F5",
+    "Roster Automation Node URL",
+    "Prov360 F5 Pool Status",
+    "SPS ProvRestore F5 Pool Status",
+    "SPS ProvRestore F5",
+    "SPS Audit History F5 Pool Status",
+    "SPS Audit History F5",
+    "MATCH SERVER Inspector URL",
+    "MATCH SERVER Console URL",
+    "NETWORKAIprov360"
+    "OEM",
+    "PDT",
+    "BPD",
+    "F5 Portal",
+    "PARESOld Node"
+]
+
+
 # 1. Merge dictionaries safely (Python 3.9+)
 # This combines both into one master list for the loop
 # Run validation and collect results
@@ -410,10 +469,22 @@ def check_url(task):
         'URLStatus': status
     }
 
+# 3. Run Parallel Checks
 # Use ThreadPoolExecutor for I/O-bound URL checking and to Execute in parallel with RETRIEVE in order
-with ThreadPoolExecutor(max_workers=20) as executor:
+with ThreadPoolExecutor(max_workers=25) as executor:
     # executor.map preserves the order of the input 'tasks'
-    all_results = list(executor.map(check_url, tasks))
+    unordered_results = list(executor.map(check_url, tasks))
+
+# 4. Sort the results based on the preferred_order list
+def sort_key(result):
+    env_name = result['Prod Env']
+    try:
+        return preferred_order.index(env_name)
+    except ValueError:
+        return len(preferred_order) # Put unknown categories at the end
+
+all_results = sorted(unordered_results, key=sort_key)
+
 
 # 2. End Time (No Microseconds) & Duration Calculation in Hours, Minutes, and Seconds
 end_ist = datetime.now(IST).replace(microsecond=0)
