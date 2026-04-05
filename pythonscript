@@ -79,11 +79,11 @@ def get_status(url, custom_timeout=10):
             return status_code, status_msg, is_up
 
     except requests.exceptions.ConnectionError:
-        return "FAILED", "This site can’t be reached<br>URL Refused to connect", False
+        return "FAILED", '<div style="color: red; font-weight: bold; text-align:center;">Connection Failed<br>This site can’t be reached</div>', False
     except requests.exceptions.Timeout:
-        return "TIMEOUT", "Server Timeout", False
+        return "TIMEOUT", '<div style="color: orange; font-weight: bold; text-align:center;">Server Timeout</div>', False
     except Exception as e:
-        return "ERROR", str(e), False
+        return "ERROR", f'<div style="color: red; font-weight: bold; text-align:center;">Error: {str(e)}</div>', False
 
 
 def send_outlook_mail(results, start_et, end_et, duration_str, total_urls, up_count, down_count):
@@ -97,40 +97,40 @@ def send_outlook_mail(results, start_et, end_et, duration_str, total_urls, up_co
     outlook = win32.Dispatch('outlook.application')
     mail = outlook.CreateItem(0)
 
-    mail.To = 'Sure, Venkatesh <Venkatesh.Sure@carelon.com>'
-    mail.CC = 'Gn, Mahesh <Mahesh.Gn@carelon.com>'
+    mail.To = 'Venkatesh.Sure@carelon.com'
+    mail.CC = 'Mahesh.Gn@carelon.com'
     mail.Subject = f'[SPS Monitoring Report] - PROD Environment Pre-Linux Patching URLs Artifacts Health Check Report - {shift} - {date_today}'
 
     success_rate = round((up_count / total_urls) * 100, 2) if total_urls > 0 else 0
 
-    # Build HTML Table
+    # Build HTML Table Rows - Each URL in its own row for perfect alignment
     table_rows = ""
     for res in results:
         table_rows += f"""
         <tr>
             <td style="border:1px solid #ddd; padding:8px; font-weight:bold; background-color:#f9f9f9; vertical-align:top;">{res['Env Type']}</td>
             <td style="border:1px solid #ddd; padding:8px; vertical-align:top;">{res['F5 and Node Names']}</td>
-            <td style="border:1px solid #ddd; padding:8px; vertical-align:top;">{res['F5 and Node URLs']}</td>
+            <td style="border:1px solid #ddd; padding:8px; vertical-align:top; word-break:break-all;">{res['F5 and Node URLs']}</td>
             <td style="border:1px solid #ddd; padding:8px; text-align:center; vertical-align:top;">{res['StatusCode']}</td>
             <td style="border:1px solid #ddd; padding:8px; vertical-align:top;">{res['URLStatus']}</td>
         </tr>"""
 
     mail.HTMLBody = f"""
     <html>
-    <body>
+    <body style="font-family: Arial, sans-serif;">
         <p>Hi Team,</p>
         <p>Please find the below Production URL's Pre-Linux Patching Health Check report.</p>
         <p>All Prod Env URL's Checking Started at <i>{start_et.strftime(fmt)}</i></p>
-        
-        <table style="border-collapse: collapse; width: 100%; font-family: Arial, sans-serif;">
+       
+        <table style="border-collapse: collapse; width: 100%; font-family: Arial, sans-serif; font-size: 14px;">
             <tr style="background-color: #f2f2f2;">
-                <th style="border:1px solid #ddd; padding:8px; text-align:left; width: 165px;">Env Type</th>
-                <th style="border:1px solid #ddd; padding:8px; text-align:left; width: 165px;">F5 and Node Names</th>
-                <th style="border:1px solid #ddd; padding:8px; text-align:left; width: 275px;">F5 and Node URLs</th>
-                <th style="border:1px solid #ddd; padding:8px; text-align:center; width:135px;">Status Code</th>
-                <th style="border:1px solid #ddd; padding:8px; text-align:center; width: 95px;">URL Status</th>
+                <th style="border:1px solid #ddd; padding:8px; text-align:left; width: 160px;">Env Type</th>
+                <th style="border:1px solid #ddd; padding:8px; text-align:left; width: 180px;">F5 and Node Names</th>
+                <th style="border:1px solid #ddd; padding:8px; text-align:left; width: 320px;">F5 and Node URLs</th>
+                <th style="border:1px solid #ddd; padding:8px; text-align:center; width: 100px;">Status Code</th>
+                <th style="border:1px solid #ddd; padding:8px; text-align:center; width: 130px;">URL Status</th>
             </tr>
-            
+           
             <!-- Summary Row -->
             <tr style="background-color: #e6f7e6; font-weight: bold;">
                 <td style="border:1px solid #ddd; padding:8px; text-align:center;" colspan="2">
@@ -147,10 +147,10 @@ def send_outlook_mail(results, start_et, end_et, duration_str, total_urls, up_co
                     Success Rate: <strong>{success_rate}%</strong>
                 </td>
             </tr>
-            
+           
             {table_rows}
         </table>
-        
+       
         <p>All Prod Env URL's Checking Finished at <i>{end_et.strftime(fmt)}</i><br>
            All Prod Env URL's Status Health Check Verified within <i>{duration_str}</i></p>
         <p><i>This is an automated report.</i></p>
@@ -163,7 +163,7 @@ def send_outlook_mail(results, start_et, end_et, duration_str, total_urls, up_co
     print("✅ Email drafted and opened in Outlook successfully.")
 
 
-# ================== URL Definitions ==================
+# ================== URL Definitions (unchanged) ==================
 # Categorized URLs
 environments_moretimout = {
     "PEGA PDMAPP F5": [
@@ -428,6 +428,7 @@ environments = {
 
 all_envs = environments_moretimout | environments
 
+# ================== Prepare Tasks ==================
 tasks = []
 for env_name, url_list in all_envs.items():
     cat, sub_env = get_category_and_env(env_name)
@@ -437,7 +438,8 @@ for env_name, url_list in all_envs.items():
             'Env Type': cat,
             'F5 and Node Names': sub_env,
             'URL': url,
-            'Timeout': timeout_val
+            'Timeout': timeout_val,
+            'OriginalEnvName': env_name # For sorting later
         })
 
 print(f"🚀 Checking {len(tasks)} URLs in parallel...\n")
@@ -448,17 +450,17 @@ def check_url(task):
     return {
         'Env Type': task['Env Type'],
         'F5 and Node Names': task['F5 and Node Names'],
-        'URL': task['URL'],
+        'F5 and Node URLs': task['URL'],
         'StatusCode': code,
         'URLStatus': status_msg,
-        'IsUP': is_up
+        'IsUP': is_up,
+        'OriginalEnvName': task['OriginalEnvName']
     }
 
 
 with ThreadPoolExecutor(max_workers=25) as executor:
     raw_results = list(executor.map(check_url, tasks))
 
-# ================== Merge with Separation Lines ==================
 grouped = defaultdict(list)
 for res in raw_results:
     grouped[res['Env Type']].append(res)
@@ -467,93 +469,63 @@ merged_results = []
 total_up = 0
 
 for cat, items in grouped.items():
+    # Collect all data with separators
     names_list = [item['F5 and Node Names'] for item in items]
     urls_list = [item['URL'] for item in items]
     codes_list = [str(item['StatusCode']) for item in items]
     statuses_list = [str(item['URLStatus']) for item in items]
 
-    # Use <hr> for clear separation between entries
     separator = "<hr style='margin: 6px 0; border: 0; border-top: 1px solid #ccc;'>"
 
-    names = separator.join(names_list)
-    urls = separator.join(urls_list)
-    codes = separator.join(codes_list)
-    statuses = separator.join(statuses_list)
+    names_combined = separator.join(names_list)
+    urls_combined = separator.join(urls_list)
+    codes_combined = separator.join(codes_list)
+    statuses_combined = separator.join(statuses_list)
 
     merged_results.append({
         'Env Type': cat,
-        'F5 and Node Names': names,
-        'F5 and Node URLs': urls,
-        'StatusCode': codes,
-        'URLStatus': statuses
+        'F5 and Node Names': names_combined,
+        'F5 and Node URLs': urls_combined,
+        'StatusCode': codes_combined,
+        'URLStatus': statuses_combined
     })
 
     total_up += sum(1 for item in items if item['IsUP'])
 
-# Sort results using preferred order
-# 1. Define the desired order of keywords/categories
-# Add or reorder this list based on your exact preference
+# ================== Sort according to preferred_order ==================
 preferred_order = [
-    "PEGA SPS F5 Pool Status",
-    "PEGA SPS F5",
-    "PEGA SPS UTILITY F5 Pool Status",
-    "PEGA SPS UTILITY F5",
-    "PEGA PDMAPP F5 Pool Status",
-    "PEGA PDMAPP F5",
-    "PEGA Hazelcast",
-    "PEGA Stream Node",
-    "PEGA Search Node",
-    "PEGA BackgroundProcessing,AgentRun3BGNodes",
-    "PEGA BackgroundProcessing,AgentRun1BGNode",
+    "PEGA SPS F5 Pool Status", "PEGA SPS F5", "PEGA SPS UTILITY F5 Pool Status",
+    "PEGA SPS UTILITY F5", "PEGA PDMAPP F5 Pool Status", "PEGA PDMAPP F5",
+    "PEGA Hazelcast", "PEGA Stream Node", "PEGA Search Node",
+    "PEGA BackgroundProcessing,AgentRun3BGNodes", "PEGA BackgroundProcessing,AgentRun1BGNode",
     "PEGA BackgroundProcessing,BIX,<br>AgentRun2BGNodes,AgentRun3BGNodes",
     "PEGA BackgroundProcessing,<br>AgentRun2BGNodes,AgentRun3BGNodes",
-    "PEGA PDM Node",
-    "PEGA WebUser Node",
-    "SPS Core Service F5 Pool Status",
-    "SPS Core Service F5",
-    "SPS Core Service Node URL",
-    "PARES Core Service F5 Pool Status",
-    "PARES Core Service F5 URL",
-    "PARES Core Service Node URL",
-    "UIX Core Service F5 Pool Status",
-    "UIX Core Service F5",
-    "UIX Core Service Node URL",
-    "Provider360 PDS Services F5 Pool Status",
-    "Provider360 PDS Services F5",
+    "PEGA PDM Node", "PEGA WebUser Node",
+    "SPS Core Service F5 Pool Status", "SPS Core Service F5", "SPS Core Service Node URL",
+    "PARES Core Service F5 Pool Status", "PARES Core Service F5 URL", "PARES Core Service Node URL",
+    "UIX Core Service F5 Pool Status", "UIX Core Service F5", "UIX Core Service Node URL",
+    "Provider360 PDS Services F5 Pool Status", "Provider360 PDS Services F5",
     "Provider360 PDS Services Node URL",
-    "SPSDARTUI F5 Pool Status",
-    "SPSDARTUI F5",
-    "PKM F5 Pool Status",
-    "PKM Node URL",
-    "UIX F5 Pool Status",
-    "UIX F5",
-    "UIX Node URL",
-    "Roster Automation F5 Pool Status",
-    "Roster Automation F5",
-    "Roster Automation Node URL",
+    "SPSDARTUI F5 Pool Status", "SPSDARTUI F5",
+    "PKM F5 Pool Status", "PKM Node URL",
+    "UIX F5 Pool Status", "UIX F5", "UIX Node URL",
+    "Roster Automation F5 Pool Status", "Roster Automation F5", "Roster Automation Node URL",
     "Prov360 F5 Pool Status",
-    "SPS ProvRestore F5 Pool Status",
-    "SPS ProvRestore F5",
-    "SPS Audit History F5 Pool Status",
-    "SPS Audit History F5",
-    "MATCH SERVER Inspector URL",
-    "MATCH SERVER Console URL",
-    "NETWORKAIprov360",
-    "OEM",
-    "PDT",
-    "BPD",
-    "F5 Portal",
-    "AppviewX Dashboard",
-    "PARESOld Node"
+    "SPS ProvRestore F5 Pool Status", "SPS ProvRestore F5",
+    "SPS Audit History F5 Pool Status", "SPS Audit History F5",
+    "MATCH SERVER Inspector URL", "MATCH SERVER Console URL",
+    "NETWORKAIprov360", "OEM", "PDT", "BPD", "F5 Portal", "AppviewX Dashboard", "PARESOld Node"
 ]
 
+# Sort results based on preferred order
 def sort_key(res):
     try:
         return preferred_order.index(res['Env Type'])
     except ValueError:
-        return len(preferred_order)
+        return len(preferred_order) + 1
 
 merged_results.sort(key=sort_key)
+
 
 # ================== End Time & Duration ==================
 end_ist = datetime.now(IST).replace(microsecond=0)
@@ -564,11 +536,12 @@ minutes, seconds = divmod(rem, 60)
 duration_str = f"{hours}h {minutes}m {seconds}s"
 
 total_urls = len(tasks)
-down_count = total_urls - total_up
+up_count = sum(1 for r in raw_results if r['IsUP'])
+down_count = total_urls - up_count
 
 print(f"\n🏁 Finished at: {end_ist.strftime(fmt)} / {end_et.strftime(fmt)}")
 print(f"⏱️ Duration: {duration_str}")
-print(f"📊 Summary: {total_up}/{total_urls} UP ({round((total_up/total_urls)*100, 2)}%)\n")
+print(f"📊 Summary: {up_count}/{total_urls} UP ({round((up_count/total_urls)*100, 2)}%)\n")
 
 # ================== Send Email ==================
-send_outlook_mail(merged_results, start_et, end_et, duration_str, total_urls, total_up, down_count)
+send_outlook_mail(raw_results, start_et, end_et, duration_str, total_urls, up_count, down_count)
