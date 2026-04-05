@@ -23,6 +23,31 @@ start_et = start_ist.astimezone(ET)
 print(f"\n🚀 All Prod Env URL's Checking started at {start_ist.strftime(fmt)}/{start_et.strftime(fmt)}")
 print("\nChecking URL's Status, Please Wait...")
 
+def get_category_and_env(env_name):
+    """
+    Splits the dictionary key into a Category and a Sub-Environment name.
+    """
+    # 1. Added missing quote and cleaned up duplicate "NETWORKAIprov360"
+    categories = [
+        "PEGA", "SPS Core Service", "PARES Core Service", "UIX Core Service", "OEM", 
+        "Roster Automation", "Prov360", "PKM", "SPS ProvRestore", "UIX", 
+        "SPS Audit History", "NETWORKAIprov360", "Provider360", "MATCH SERVER", 
+        "PARESOld", "SPSDARTUI"
+    ]
+    
+    # 2. Sort by length (longest first) so "UIX Core Service" matches before "UIX"
+    categories.sort(key=len, reverse=True)
+    
+    for cat in categories:
+        if env_name.startswith(cat):
+            # 3. Use env_name instead of undefined full_name
+            # 4. Use replace(..., 1) to only remove the prefix once
+            remaining = env_name.replace(cat, "", 1).strip()
+            return cat, remaining if remaining else "General"
+            
+    return "Other", env_name
+
+
 def get_status(url, custom_timeout=10):
     """
     Checks URL status mimicking Microsoft Edge InPrivate mode.
@@ -109,7 +134,8 @@ def send_outlook_mail(results):
         color = "green" if res['URLStatus'] == "UP and Running" else "red"
         table_rows += f"""
         <tr>
-            <td style="border:1px solid #ddd; padding:8px;">{res['Prod Env']}</td>
+            <td style="border:1px solid #ddd; padding:8px; font-weight:bold; background-color:#f9f9f9;">{res['Env Type']}</td>
+            <td style="border:1px solid #ddd; padding:8px;">{res['F5 and Node Names']}</td>
             <td style="border:1px solid #ddd; padding:8px;">{res['F5 and Node URLs']}</td>
             <td style="border:1px solid #ddd; padding:8px; text-align:center;">{res['StatusCode']}</td>
             <td style="border:1px solid #ddd; padding:8px; color:{color}; font-weight:bold;">{res['URLStatus']}</td>
@@ -121,9 +147,10 @@ def send_outlook_mail(results):
             <p>Hi Team,</p>
             <p>Please find the below Production URL's Pre-Linux Patching Health Check report.</p>
 	    <p>All Prod Env URL's Checking Started at <i>{start_et.strftime(fmt)}</i></p>         
-    <table style="border-collapse: collapse; width: 95%; font-family: Arial, sans-serif;">
+    <table style="border-collapse: collapse; width: 100%; font-family: Arial, sans-serif;">
         <tr style="background-color: #f2f2f2;">
-            <th style="border:1px solid #ddd; padding:8px; text-align:left; width: 165px; white-space: normal;">Prod Env</th>
+            <th style="border:1px solid #ddd; padding:8px; text-align:left; width: 165px; white-space: normal;">Env Type</th>
+            <th style="border:1px solid #ddd; padding:8px; text-align:left; width: 165px; white-space: normal;">F5 and Node Names</th>
             <th style="border:1px solid #ddd; padding:8px; text-align:left; width: 275px; white-space: normal;">F5 and Node URLs</th>
             <th style="border:1px solid #ddd; padding:8px; text-align:center; width:135px; white-space: normal;">Status Code</th>
             <th style="border:1px solid #ddd; padding:8px; text-align:center; width: 95px; overflow: hidden; text-overflow: ellipsis;">URL Status</th>
@@ -459,7 +486,6 @@ preferred_order = [
     "PARESOld Node"
 ]
 
-
 # 1. Merge dictionaries safely (Python 3.9+)
 # This combines both into one master list for the loop
 # Run validation and collect results
@@ -467,17 +493,18 @@ all_envs = environments_moretimout | environments
 tasks = []
 
 for env_name, url_list in all_envs.items():
+    cat, sub_env = get_category_and_env(env_name)
     for url in url_list:
         timeout_val = 900 if url in environments_moretimout.get(env_name, []) else 10
-        tasks.append((env_name, url, timeout_val))
+        tasks.append({'Env Type': cat, 'F5 and Node Names': sub_env, 'URL': url, 'TIMEOUT VAL': timeout_val})
 print(f"🚀 Checking {len(tasks)} URLs in parallel...")
 
 # 2. Worker function for the thread
 def check_url(task):
-    env_name, url, timeout_val = task
-    code, status = get_status(url, timeout_val)
+    code, status = get_status(task['URL'], timeout_val)
     return {
-        'Prod Env': env_name, 
+        'Env Type': env_name, 
+        'F5 and Node Names': f5node_name,
         'F5 and Node URLs': url, 
         'StatusCode': code, 
         'URLStatus': status
@@ -491,7 +518,7 @@ with ThreadPoolExecutor(max_workers=25) as executor:
 
 # 4. Sort the results based on the preferred_order list
 def sort_key(result):
-    env_name = result['Prod Env']
+    env_name = result['Env Type']
     try:
         return preferred_order.index(env_name)
     except ValueError:
@@ -514,86 +541,3 @@ print(f"\n⏱️ All Prod Env URL's Status Health Check Verification Duration: {
 
 # Send the email
 send_outlook_mail(all_results)
-
-import asyncio
-import os
-import win32com.client as win32
-from playwright.async_api import async_playwright
-
-# 1. Define your 50+ URLs and desired filenames
-MONITOR_LIST = [
-    {"url": "https://sps.elevancehealth.com/?f5poolstatus", "name": "PEGA SPS F5 Pool Status"},
-    {"url": "https://spspegautility.elevancehealth.com/prweb/?f5poolstatus", "name": "PEGA SPS UTILITY F5 Pool Status"},
-    {"url": "https://pdmapp.elevancehealth.com/prweb/?f5poolstatus", "name": "PEGA PDMAPP F5 Pool Status"},
-    {"url": "https://spsservices.anthem.com/?f5poolstatus", "name": "SPS Core Service F5 Pool Status"},
-    {"url": "https://paresspsservices.anthem.com/?f5poolstatus", "name": "PARES Core Service F5 Pool Status"},
-    {"url": "https://spsuixservices.anthem.com/?f5poolstatus", "name": "UIX Core Service F5 Pool Status"},
-    {"url": "https://provider360.anthem.com/pdsservices/?f5poolstatus", "name": "Provider360 PDS Services F5 Pool Status"},
-    {"url": "https://spsdartui.anthem.com/?f5poolstatus", "name": "SPSDARTUI F5 Pool Status"},
-    {"url": "https://pdm-pkm.anthem.com/?f5poolstatus", "name": "PKM F5 Pool Status"},
-    {"url": "https://pdm-uix.anthem.com/?f5poolstatus", "name": "UIX F5 Pool Status"},
-    {"url": "https://providerrma.elevancehealth.com/?f5poolstatus", "name": "Roster Automation F5 Pool Status"},
-    {"url": "https://services.provnexus.elevancehealth.com/?f5poolstatus", "name": "Prov360 F5 Pool Status"},
-    {"url": "https://spsrestore.elevancehealth.com/?f5poolstatus", "name": "SPS ProvRestore F5 Pool Status"},
-    {"url": "https://spsaudithistory.elevancehealth.com/?f5poolstatus", "name": "SPS Audit History F5 Pool Status"}
-]
-
-async def capture_screenshot(browser, url, name, output_dir="screenshots"):
-    """Captures a single screenshot and returns the absolute file path."""
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-        
-    page = await browser.new_page()
-    # win32com works best with absolute paths
-    output_path = os.path.abspath(os.path.join(output_dir, f"{name}.png"))
-    
-    try:
-        print(f"Monitoring: {url}")
-        await page.goto(url, wait_until="networkidle", timeout=60000)
-        await page.screenshot(path=output_path, full_page=True)
-        return output_path
-    except Exception as e:
-        print(f"Error capturing {url}: {e}")
-        return None
-    finally:
-        await page.close()
-
-async def monitor_all(data_list):
-    """Orchestrates concurrent screenshot captures."""
-    async with async_playwright() as p:
-        browser = await p.chromium.launch()
-        tasks = [capture_screenshot(browser, item['url'], item['name']) for item in data_list]
-        file_paths = await asyncio.gather(*tasks)
-        await browser.close()
-        return [f for f in file_paths if f]
-
-def send_outlook_email(file_paths):
-    """Sends all captured screenshots via the Outlook Desktop App."""
-    try:
-        outlook = win32.Dispatch('outlook.application')
-        mail = outlook.CreateItem(0) # 0 = olMailItem
-        
-        mail.To = 'Sure, Venkatesh <Venkatesh.Sure@carelon.com>'
-        mail.Subject = f"Monitoring Report: {len(file_paths)} Screenshots"
-        mail.Body = "Please find the requested screenshots attached."
-
-        # Attach each file
-        for file_path in file_paths:
-            if os.path.exists(file_path):
-                mail.Attachments.Add(file_path)
-
-        mail.Send()
-        print("Outlook email sent successfully!")
-    except Exception as e:
-        print(f"Failed to send email via Outlook: {e}")
-
-if __name__ == "__main__":
-    # 1. Capture everything
-    attachments = asyncio.run(monitor_all(MONITOR_LIST))
-    
-    # 2. Send via Outlook if screenshots exist
-    if attachments:
-        send_outlook_email(attachments)
-    else:
-        print("No screenshots were captured. Email not sent.")
-
