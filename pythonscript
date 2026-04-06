@@ -1,547 +1,189 @@
-import requests
-import urllib3
-from datetime import datetime
-import win32com.client as win32
-from concurrent.futures import ThreadPoolExecutor
-from collections import defaultdict
-
-# Suppress insecure request warnings
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-try:
-    from zoneinfo import ZoneInfo
-except ImportError:
-    import pytz as ZoneInfo
-
-# ================== Configuration ==================
-IST = ZoneInfo("Asia/Kolkata")
-ET = ZoneInfo("America/New_York")
-fmt = "%Y-%m-%d %I:%M:%S %p %Z"
-
-start_ist = datetime.now(IST).replace(microsecond=0)
-start_et = start_ist.astimezone(ET)
-
-print(f"\n🚀 All Prod Env URL's Checking started at {start_ist.strftime(fmt)} / {start_et.strftime(fmt)}")
-print("Checking URL's Status, Please Wait...\n")
-
-# ================== Helper Functions ==================
-def get_category_and_env(env_name):
-    categories = [
-        "PEGA", "SPS Core Service", "PARES Core Service", "UIX Core Service", "OEM",
-        "Roster Automation", "Prov360", "PKM", "SPS ProvRestore", "UIX",
-        "SPS Audit History", "NETWORKAIprov360", "Provider360", "MATCH SERVER",
-        "PARESOld", "SPSDARTUI"
-    ]
-    categories.sort(key=len, reverse=True)
-
-    for cat in categories:
-        if env_name.startswith(cat):
-            remaining = env_name.replace(cat, "", 1).strip()
-            return cat, remaining if remaining else "General"
-    return "Other", env_name
-
-
-def get_status(url, custom_timeout=10):
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                      "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 Edg/122.0.0.0",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache"
-    }
-
+from fastapi import FastAPI, HTTPException, Query, Depends, Security
+from fastapi.security import APIKeyHeader
+from fastapi.middleware.cors import CORSMiddleware
+import subprocess
+import os
+from typing import Optional
+from cryptography.fernet import Fernet
+import base64
+from dotenv import load_dotenv
+ 
+# Load environment variables from .env file
+load_dotenv()
+ 
+app = FastAPI()
+ 
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Restrict to specific domains in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+ 
+# CyberArk CLI path
+CLI_PATH = "/opt/CARKaim/sdk/clipasswordsdk"
+ 
+# API Key configuration
+API_KEY_NAME = "X-API-Key"
+API_KEY = os.getenv("CYBERARK_API_KEY")
+if not API_KEY:
+    raise ValueError("CYBERARK_API_KEY environment variable is required")
+api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=True)
+ 
+# Encryption configuration
+ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
+if not ENCRYPTION_KEY:
+    raise ValueError("ENCRYPTION_KEY environment variable is required")
+# Ensure the key is 32 bytes for Fernet
+if len(ENCRYPTION_KEY.encode()) != 32:
+    # Pad or truncate to 32 bytes
+    key_bytes = ENCRYPTION_KEY.encode()[:32].ljust(32, b'0')
+else:
+    key_bytes = ENCRYPTION_KEY.encode()
+ 
+print(f"Using encryption key (first 10 chars): {ENCRYPTION_KEY[:10]}...")  # Debug log
+print(f"Key length: {len(key_bytes)} bytes")  # Debug log
+ 
+# Convert to Fernet compatible key
+fernet_key = base64.urlsafe_b64encode(key_bytes)
+cipher = Fernet(fernet_key)
+ 
+ 
+def get_cipher_from_key(decryption_key: str) -> Fernet:
+    """Create a Fernet cipher from a decryption key"""
+    # Ensure the key is 32 bytes for Fernet
+    if len(decryption_key.encode()) != 32:
+        # Pad or truncate to 32 bytes
+        key_bytes = decryption_key.encode()[:32].ljust(32, b'0')
+    else:
+        key_bytes = decryption_key.encode()
+   
+    # Convert to Fernet compatible key
+    fernet_key = base64.urlsafe_b64encode(key_bytes)
+    return Fernet(fernet_key)
+ 
+ 
+def encrypt_password(password: str) -> str:
+    """Encrypt a password using Fernet symmetric encryption"""
+    encrypted_password = cipher.encrypt(password.encode())
+    return base64.urlsafe_b64encode(encrypted_password).decode()
+ 
+ 
+def decrypt_password(encrypted_password: str) -> str:
+    """Decrypt a password using Fernet symmetric encryption"""
     try:
-        with requests.Session() as session:
-            response = session.get(url, headers=headers, timeout=custom_timeout,
-                                   allow_redirects=True, verify=False)
-            status_code = response.status_code
-            style_base = "font-weight: bold; text-align: center;"
-
-            if status_code == 200:
-                status_msg = f'<div style="color: green; {style_base}">UP and Running</div>'
-                is_up = True
-            elif status_code == 404:
-                if any(x in url.upper() for x in ["WELLPOINT", "DC04", "VA10"]):
-                    status_msg = ('<div style="color: green; font-weight: bold; text-align:center;">JVM UP</div>'
-                                  '<div style="color: red; font-weight: bold; text-align:center;">'
-                                  'but URL was DOWN<br>Context Root Not Found</div>')
-                else:
-                    status_msg = ('<div style="color: red; font-weight: bold; text-align:center;">'
-                                  'URL was DOWN<br>Context Root Not Found</div>')
-                is_up = False
-            elif status_code in [500, 403, 503]:
-                status_msg = f'<div style="color: red; {style_base}">DOWN ({status_code})<br>Service Unavailable</div>'
-                is_up = False
-            else:
-                status_msg = f'<div style="color: orange; {style_base}">Status: {status_code}</div>'
-                is_up = False
-
-            return status_code, status_msg, is_up
-
-    except requests.exceptions.ConnectionError:
-        return "FAILED", '<div style="color: red; font-weight: bold; text-align:center;">Connection Failed<br>This site can’t be reached</div>', False
-    except requests.exceptions.Timeout:
-        return "TIMEOUT", '<div style="color: orange; font-weight: bold; text-align:center;">Server Timeout</div>', False
+        print(f"Attempting to decrypt: {encrypted_password[:50]}...")  # Debug log
+        encrypted_bytes = base64.urlsafe_b64decode(encrypted_password.encode())
+        decrypted_password = cipher.decrypt(encrypted_bytes)
+        return decrypted_password.decode()
     except Exception as e:
-        return "ERROR", f'<div style="color: red; font-weight: bold; text-align:center;">Error: {str(e)}</div>', False
-
-
-def send_outlook_mail(results, start_et, end_et, duration_str, total_urls, up_count, down_count):
-    print("\nDrafting Outlook email...")
-
-    now = datetime.now()
-    hour = now.hour
-    shift = "S1" if 6 <= hour < 15 else "S2" if 15 <= hour < 23 else "S3"
-    date_today = now.strftime("%d %B %Y")
-
-    outlook = win32.Dispatch('outlook.application')
-    mail = outlook.CreateItem(0)
-
-    mail.To = 'Venkatesh.Sure@carelon.com'
-    mail.CC = 'Mahesh.Gn@carelon.com'
-    mail.Subject = f'[SPS Monitoring Report] - PROD Environment Pre-Linux Patching URLs Artifacts Health Check Report - {shift} - {date_today}'
-
-    success_rate = round((up_count / total_urls) * 100, 2) if total_urls > 0 else 0
-
-    # Build HTML Table Rows - Each URL in its own row for perfect alignment
-    table_rows = ""
-    for res in results:
-        table_rows += f"""
-        <tr>
-            <td style="border:1px solid #ddd; padding:8px; font-weight:bold; background-color:#f9f9f9; vertical-align:top;">{res['Env Type']}</td>
-            <td style="border:1px solid #ddd; padding:8px; vertical-align:top;">{res['F5 and Node Names']}</td>
-            <td style="border:1px solid #ddd; padding:8px; vertical-align:top; word-break:break-all;">{res['F5 and Node URLs']}</td>
-            <td style="border:1px solid #ddd; padding:8px; text-align:center; vertical-align:top;">{res['StatusCode']}</td>
-            <td style="border:1px solid #ddd; padding:8px; vertical-align:top;">{res['URLStatus']}</td>
-        </tr>"""
-
-    mail.HTMLBody = f"""
-    <html>
-    <body style="font-family: Arial, sans-serif;">
-        <p>Hi Team,</p>
-        <p>Please find the below Production URL's Pre-Linux Patching Health Check report.</p>
-        <p>All Prod Env URL's Checking Started at <i>{start_et.strftime(fmt)}</i></p>
-       
-        <table style="border-collapse: collapse; width: 100%; font-family: Arial, sans-serif; font-size: 14px;">
-            <tr style="background-color: #f2f2f2;">
-                <th style="border:1px solid #ddd; padding:8px; text-align:left; width: 160px;">Env Type</th>
-                <th style="border:1px solid #ddd; padding:8px; text-align:left; width: 180px;">F5 and Node Names</th>
-                <th style="border:1px solid #ddd; padding:8px; text-align:left; width: 320px;">F5 and Node URLs</th>
-                <th style="border:1px solid #ddd; padding:8px; text-align:center; width: 100px;">Status Code</th>
-                <th style="border:1px solid #ddd; padding:8px; text-align:center; width: 130px;">URL Status</th>
-            </tr>
-           
-            <!-- Summary Row -->
-            <tr style="background-color: #e6f7e6; font-weight: bold;">
-                <td style="border:1px solid #ddd; padding:8px; text-align:center;" colspan="2">
-                    <strong>SUMMARY</strong>
-                </td>
-                <td style="border:1px solid #ddd; padding:8px; text-align:center;">
-                    Total URLs: <strong>{total_urls}</strong>
-                </td>
-                <td style="border:1px solid #ddd; padding:8px; text-align:center; color:green;">
-                    UP: <strong>{up_count}</strong>
-                </td>
-                <td style="border:1px solid #ddd; padding:8px; text-align:center; color:red;">
-                    DOWN / Failed: <strong>{down_count}</strong><br>
-                    Success Rate: <strong>{success_rate}%</strong>
-                </td>
-            </tr>
-           
-            {table_rows}
-        </table>
-       
-        <p>All Prod Env URL's Checking Finished at <i>{end_et.strftime(fmt)}</i><br>
-           All Prod Env URL's Status Health Check Verified within <i>{duration_str}</i></p>
-        <p><i>This is an automated report.</i></p>
-        <p>Regards,<br>Venkatesh Sure</p>
-    </body>
-    </html>
+        print(f"Decryption error: {str(e)}")  # Debug log
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to decrypt password: {str(e)}"
+        )
+ 
+ 
+async def get_api_key(api_key: str = Security(api_key_header)):
     """
-
-    mail.Display()
-    print("✅ Email drafted and opened in Outlook successfully.")
-
-
-# ================== URL Definitions (unchanged) ==================
-# Categorized URLs
-environments_moretimout = {
-    "PEGA PDMAPP F5": [
-        "https://pdmapp.elevancehealth.com/prweb/"
-    ],
-    "PARES Core Service F5 URL": [
-        "https://paresspsservices.anthem.com/spsservices"
-    ],
-}
-
-environments = {
-    "PEGA SPS F5 Pool Status": [
-        "https://sps.elevancehealth.com/?f5poolstatus"
-    ],
-    "PEGA SPS F5": [
-        "https://sps.elevancehealth.com/prweb/",
-    ],
-    "PEGA SPS UTILITY F5 Pool Status": [
-        "https://spspegautility.elevancehealth.com/prweb/?f5poolstatus"
-    ],
-    "PEGA SPS UTILITY F5": [
-        "https://spspegautility.elevancehealth.com/prweb/"
-    ],
-    "PEGA PDMAPP F5 Pool Status": [
-        "https://pdmapp.elevancehealth.com/prweb/?f5poolstatus"
-    ],
-    "PEGA Hazelcast": [
-        "https://va10plvpeg516.wellpoint.com:8443/prcluster_service/ClusterServiceHealthCheck",
-        "https://va10plvpeg517.wellpoint.com:8443/prcluster_service/ClusterServiceHealthCheck",
-        "https://va10plvpeg518.wellpoint.com:8443/prcluster_service/ClusterServiceHealthCheck"
-    ],
-    "PEGA Stream Node": [
-        "https://dc04plvpeg391.wellpoint.com:8444/prweb/PRServlet/",
-        "https://dc04plvpeg393.wellpoint.com:8443/prweb/PRServlet/"
-    ],
-    "PEGA Search Node": [
-        "https://dc04plvpeg391.wellpoint.com:8443/prweb/PRServlet/",
-        "https://dc04plvpeg392.wellpoint.com:8443/prweb/PRServlet/"
-    ],
-    "PEGA BackgroundProcessing,AgentRun3BGNodes": [
-        "https://dc04plvpeg393.wellpoint.com:8444/prweb/PRServlet/"
-    ],
-    "PEGA BackgroundProcessing,AgentRun1BGNode": [
-        "https://dc04plvpeg392.wellpoint.com:8444/prweb/PRServlet/"
-    ],
-    "PEGA BackgroundProcessing,BIX,<br>AgentRun2BGNodes,AgentRun3BGNodes": [
-        "https://dc04plvpeg394.wellpoint.com:8443/prweb/PRServlet/"
-    ],
-    "PEGA BackgroundProcessing,<br>AgentRun2BGNodes,AgentRun3BGNodes": [
-        "https://dc04plvpeg394.wellpoint.com:8444/prweb/PRServlet/"
-    ],
-    "PEGA PDM Node": [
-        "https://dc04plvpeg396.wellpoint.com:8443/prweb/PRServlet/",
-        "https://dc04plvpeg396.wellpoint.com:8444/prweb/PRServlet/",
-        "https://dc04plvpeg397.wellpoint.com:8443/prweb/PRServlet/",
-        "https://dc04plvpeg397.wellpoint.com:8444/prweb/PRServlet/",
-        "https://dc04plvpeg398.wellpoint.com:8443/prweb/PRServlet/",
-        "https://dc04plvpeg398.wellpoint.com:8444/prweb/PRServlet/",
-        "https://dc04plvpeg399.wellpoint.com:8443/prweb/PRServlet/",
-        "https://dc04plvpeg399.wellpoint.com:8444/prweb/PRServlet/",
-        "https://dc04plvpeg395.wellpoint.com:8444/prweb/PRServlet/",
-        "https://dc04plvpeg395.wellpoint.com:8443/prweb/PRServlet/"
-    ],
-    "PEGA WebUser Node": [
-        "https://dc04plvpeg400.wellpoint.com:8443/prweb/PRServlet/",
-        "https://dc04plvpeg400.wellpoint.com:8444/prweb/PRServlet/",
-        "https://dc04plvpeg401.wellpoint.com:8443/prweb/PRServlet/",
-        "https://dc04plvpeg401.wellpoint.com:8444/prweb/PRServlet/",
-        "https://dc04plvpeg402.wellpoint.com:8443/prweb/PRServlet/",
-        "https://dc04plvpeg402.wellpoint.com:8444/prweb/PRServlet/",
-        "https://dc04plvpeg403.wellpoint.com:8443/prweb/PRServlet/",
-        "https://dc04plvpeg403.wellpoint.com:8444/prweb/PRServlet/",
-        "https://dc04plvpeg404.wellpoint.com:8443/prweb/PRServlet/",
-        "https://dc04plvpeg404.wellpoint.com:8444/prweb/PRServlet/",
-        "https://dc04plvpeg405.wellpoint.com:8443/prweb/PRServlet/",
-        "https://dc04plvpeg405.wellpoint.com:8444/prweb/PRServlet/"
-    ],
-    "OEM": [
-        "https://oem.elevancehealth.com/em/faces/logon/core-uifwk-console-login"
-    ],
-    "Roster Automation F5 Pool Status": [
-        "https://providerrma.elevancehealth.com/?f5poolstatus"
-    ],
-    "Roster Automation F5": [
-        "https://providerrma.elevancehealth.com/app/dashboard"
-    ],
-    "Roster Automation Node URL": [
-        "https://dc04plvsps300.wellpoint.com:8998/app/dashboard",
-        "https://dc04plvsps301.wellpoint.com:8998/app/dashboard"
-    ],
-    "Prov360 F5 Pool Status": [
-        "https://services.provnexus.elevancehealth.com/?f5poolstatus"
-    ],
-    "SPS ProvRestore F5 Pool Status": [
-        "https://spsrestore.elevancehealth.com/?f5poolstatus"
-    ],
-    "SPS ProvRestore F5": [
-        "https://spsrestore.elevancehealth.com/"
-    ],
-    "SPS Audit History F5 Pool Status": [
-        "https://spsaudithistory.elevancehealth.com/?f5poolstatus"
-    ],
-    "SPS Audit History F5": [
-        "https://spsaudithistory.elevancehealth.com/"
-    ],
-    "PKM F5 Pool Status": [
-        "https://pdm-pkm.anthem.com/?f5poolstatus"
-    ],
-    "PKM Node URL": [
-        "https://dc04plvwbs371.wellpoint.com:25694/translationAdapter/testMe",
-        "https://dc04plvwbs371.wellpoint.com:25695/translationAdapter/testMe",
-        "https://dc04plvwbs371.wellpoint.com:25696/translationAdapter/testMe",
-        "https://dc04plvwbs372.wellpoint.com:25694/translationAdapter/testMe",
-        "https://dc04plvwbs372.wellpoint.com:25695/translationAdapter/testMe",
-        "https://dc04plvwbs372.wellpoint.com:25696/translationAdapter/testMe",
-        "https://dc04plvwbs373.wellpoint.com:25694/translationAdapter/testMe",
-        "https://dc04plvwbs373.wellpoint.com:25695/translationAdapter/testMe",
-        "https://dc04plvwbs373.wellpoint.com:25696/translationAdapter/testMe",
-        "https://dc04plvwbs374.wellpoint.com:25694/translationAdapter/testMe",
-        "https://dc04plvwbs374.wellpoint.com:25695/translationAdapter/testMe",
-        "https://dc04plvwbs374.wellpoint.com:25696/translationAdapter/testMe"
-    ],
-    "MATCH SERVER Inspector URL": [
-        "https://va10plvwbs687.wellpoint.com:10047/inspector/common/login.ihtml",
-        "https://va10plvwbs688.wellpoint.com:10047/inspector/common/login.ihtml"
-    ],
-    "MATCH SERVER Console URL": [
-        "https://va10plvwbs687.wellpoint.com:10002/ibm/console/logon.jsp",
-        "https://va10plvwbs688.wellpoint.com:10002/ibm/console/logon.jsp"
-    ],
-    "SPS Core Service F5 Pool Status": [
-        "https://spsservices.anthem.com/?f5poolstatus"
-    ],
-    "SPS Core Service F5": [
-        "https://spsservices.anthem.com/spsservices"
-    ],
-    "SPS Core Service Node URL": [
-        "https://va10plvwbs628.wellpoint.com:25694/spsservices",
-        "https://va10plvwbs629.wellpoint.com:25694/spsservices",
-        "https://va10plvwbs629.wellpoint.com:25695/spsservices",
-        "https://va10plvwbs630.wellpoint.com:25694/spsservices",
-        "https://va10plvwbs630.wellpoint.com:25695/spsservices",
-        "https://va10plvwbs744.wellpoint.com:25694/spsservices",
-        "https://va10plvwbs744.wellpoint.com:25695/spsservices",
-        "https://va10plvwbs744.wellpoint.com:25696/spsservices",
-        "https://va10plvwbs745.wellpoint.com:25694/spsservices",
-        "https://va10plvwbs745.wellpoint.com:25695/spsservices",
-        "https://va10plvwbs745.wellpoint.com:25696/spsservices",
-        "https://va10plvwbs746.wellpoint.com:25694/spsservices",
-        "https://va10plvwbs747.wellpoint.com:25694/spsservices",
-        "https://va10plvwbs747.wellpoint.com:25695/spsservices",
-        "https://va10plvwbs747.wellpoint.com:25696/spsservices",
-        "https://va10plvwbs748.wellpoint.com:25694/spsservices",
-        "https://va10plvwbs748.wellpoint.com:25695/spsservices",
-        "https://va10plvwbs748.wellpoint.com:25696/spsservices",
-        "https://va10plvwbs749.wellpoint.com:25694/spsservices",
-        "https://va10plvwbs749.wellpoint.com:25695/spsservices",
-        "https://va10plvwbs749.wellpoint.com:25696/spsservices",
-        "https://va10plvwbs750.wellpoint.com:25694/spsservices",
-        "https://va10plvwbs750.wellpoint.com:25695/spsservices",
-        "https://va10plvwbs750.wellpoint.com:25696/spsservices",
-        "https://va10plvwbs751.wellpoint.com:25694/spsservices",
-        "https://va10plvwbs751.wellpoint.com:25695/spsservices",
-        "https://va10plvwbs751.wellpoint.com:25696/spsservices",
-        "https://va10plvwbs752.wellpoint.com:25694/spsservices",
-        "https://va10plvwbs752.wellpoint.com:25695/spsservices",
-        "https://va10plvwbs752.wellpoint.com:25696/spsservices"
-    ],
-    "PARES Core Service F5 Pool Status": [
-        "https://paresspsservices.anthem.com/?f5poolstatus"
-    ],
-    "PARES Core Service Node URL": [
-        "https://va10plvwbs628.wellpoint.com:25695/spsservices",
-        "https://va10plvwbs628.wellpoint.com:25696/spsservices",
-        "https://va10plvwbs746.wellpoint.com:25695/spsservices",
-        "https://va10plvwbs746.wellpoint.com:25696/spsservices"
-    ],
-    "UIX Core Service F5 Pool Status": [
-        "https://spsuixservices.anthem.com/?f5poolstatus"
-    ],
-    "UIX Core Service F5": [
-        "https://spsuixservices.anthem.com/spsservices"
-    ],
-    "UIX Core Service Node URL": [
-        "https://va10plvwbs629.wellpoint.com:25696/spsservices",
-        "https://va10plvwbs630.wellpoint.com:25696/spsservices"
-    ],
-    "SPSDARTUI F5 Pool Status": [
-        "https://spsdartui.anthem.com/?f5poolstatus"
-    ],
-    "SPSDARTUI F5": [
-        "https://spsdartui.anthem.com/"
-    ],
-    "UIX F5 Pool Status": [
-        "https://pdm-uix.anthem.com/?f5poolstatus"
-    ],
-    "UIX F5": [
-        "https://pdm-uix.anthem.com/",
-    ],
-    "UIX Node URL": [
-        "https://dc04plvwbs321.wellpoint.com:9543/",
-        "https://dc04plvwbs321.wellpoint.com:9444/",
-        "https://dc04plvwbs322.wellpoint.com:9543/",
-        "https://dc04plvwbs322.wellpoint.com:9444/"
-    ],
-    "Provider360 PDS Services F5 Pool Status": [
-        "https://provider360.anthem.com/pdsservices/?f5poolstatus"
-    ],
-    "Provider360 PDS Services F5": [
-        "https://provider360.anthem.com/pdsservices/"
-    ],
-    "Provider360 PDS Services Node URL": [
-        "https://va10plvwbs669.wellpoint.com:10017/pdsservices",
-        "https://va10plvwbs669.wellpoint.com:10018/pdsservices",
-    ],
-    "NETWORKAIprov360": [
-        "https://netai.prov360prod.awsdns.internal.das/dashboard/"
-    ],
-    "PDT": [
-        "http://dc04plvcfe305:8070/pdt_fhir_nexus/appHealthCheck",
-        "http://dc04plvcfe305:8071/pdt_fhir_nexus/appHealthCheck",
-        "http://dc04plvcfe305:8072/pdt_fhir_nexus/appHealthCheck",
-        "http://dc04plvcfe305:8073/pdt_fhir_nexus/appHealthCheck",
-        "http://dc04plvcfe305:8074/pdt_fhir_nexus/appHealthCheck",
-        "http://dc04plvcfe305:8075/pdt_fhir_nexus/appHealthCheck",
-        "http://dc04plvcfe305:8076/pdt_fhir_nexus/appHealthCheck",
-        "http://dc04plvcfe305:8077/pdt_fhir_nexus/appHealthCheck",
-        "http://dc04plvcfe305:8078/pdt_fhir_nexus/appHealthCheck",
-        "http://dc04plvcfe305:8078/pdt_fhir_nexus/dashboard",
-        "http://dc04plvcfe305:8070/pdt_fhir_nexus/dashboard?Etl_load_ids=2299,2296"
-    ],
-    "BPD": [
-        "http://dc04plvcfe306.wellpoint.com:45699/bdd/config/findAll",
-        "http://dc04plvcfe306.wellpoint.com:45698/bdd/config/findAll",
-        "http://dc04plvcfe306.wellpoint.com:45697/bdd/config/findAll",
-        "http://dc04plvcfe306.wellpoint.com:35699/bdd/config/findAll",
-        "http://dc04plvcfe306.wellpoint.com:35696/bdd/config/findAll",
-        "http://dc04plvcfe306.wellpoint.com:35697/bdd/config/findAll",
-        "http://dc04plvcfe306.wellpoint.com:25699/bdd/config/findAll",
-        "http://dc04plvcfe306.wellpoint.com:25698/bdd/config/findAll",
-        "http://dc04plvcfe306.wellpoint.com:25697/bdd/config/findAll" 
-    ],
-    "F5 Portal": [
-        "https://f5portal.internal.das/vips"
-    ],
-    "AppviewX Dashboard": [
-        "https://elevancehealth.appvx.com/appviewx/app#dashboard/"
-    ],
-    "PARESOld Node": [
-        "https://va10plvwbs669.wellpoint.com:10012/parespsservices",
-        "https://va10plvwbs669.wellpoint.com:10012/spsservices",
-        "https://va10plvwbs669.wellpoint.com:10013/parespsservices",
-        "https://va10plvwbs669.wellpoint.com:10013/spsservices",
-        "https://va10plvwbs669.wellpoint.com:10014/parespsservices",
-        "https://va10plvwbs669.wellpoint.com:10014/spsservices",
-        "https://va10plvwbs669.wellpoint.com:10015/parespsservices",
-        "https://va10plvwbs669.wellpoint.com:10015/spsservices",
-        "https://va10plvwbs669.wellpoint.com:10016/parespsservices",
-        "https://va10plvwbs669.wellpoint.com:10016/spsservices"
-    ],
-}
-
-all_envs = environments_moretimout | environments
-
-# ================== Prepare Tasks ==================
-tasks = []
-for env_name, url_list in all_envs.items():
-    cat, sub_env = get_category_and_env(env_name)
-    for url in url_list:
-        timeout_val = 900 if env_name in environments_moretimout else 10
-        tasks.append({
-            'Env Type': cat,
-            'F5 and Node Names': sub_env,
-            'URL': url,
-            'Timeout': timeout_val,
-            'OriginalEnvName': env_name # For sorting later
-        })
-
-print(f"🚀 Checking {len(tasks)} URLs in parallel...\n")
-
-# ================== Parallel Checking ==================
-def check_url(task):
-    code, status_msg, is_up = get_status(task['URL'], task['Timeout'])
-    return {
-        'Env Type': task['Env Type'],
-        'F5 and Node Names': task['F5 and Node Names'],
-        'F5 and Node URLs': task['URL'],
-        'StatusCode': code,
-        'URLStatus': status_msg,
-        'IsUP': is_up,
-        'OriginalEnvName': task['OriginalEnvName']
-    }
-
-
-with ThreadPoolExecutor(max_workers=25) as executor:
-    raw_results = list(executor.map(check_url, tasks))
-
-grouped = defaultdict(list)
-for res in raw_results:
-    grouped[res['Env Type']].append(res)
-
-merged_results = []
-total_up = 0
-
-for cat, items in grouped.items():
-    # Collect all data with separators
-    names_list = [item['F5 and Node Names'] for item in items]
-    urls_list = [item['URL'] for item in items]
-    codes_list = [str(item['StatusCode']) for item in items]
-    statuses_list = [str(item['URLStatus']) for item in items]
-
-    separator = "<hr style='margin: 6px 0; border: 0; border-top: 1px solid #ccc;'>"
-
-    names_combined = separator.join(names_list)
-    urls_combined = separator.join(urls_list)
-    codes_combined = separator.join(codes_list)
-    statuses_combined = separator.join(statuses_list)
-
-    merged_results.append({
-        'Env Type': cat,
-        'F5 and Node Names': names_combined,
-        'F5 and Node URLs': urls_combined,
-        'StatusCode': codes_combined,
-        'URLStatus': statuses_combined
-    })
-
-    total_up += sum(1 for item in items if item['IsUP'])
-
-# ================== Sort according to preferred_order ==================
-preferred_order = [
-    "PEGA SPS F5 Pool Status", "PEGA SPS F5", "PEGA SPS UTILITY F5 Pool Status",
-    "PEGA SPS UTILITY F5", "PEGA PDMAPP F5 Pool Status", "PEGA PDMAPP F5",
-    "PEGA Hazelcast", "PEGA Stream Node", "PEGA Search Node",
-    "PEGA BackgroundProcessing,AgentRun3BGNodes", "PEGA BackgroundProcessing,AgentRun1BGNode",
-    "PEGA BackgroundProcessing,BIX,<br>AgentRun2BGNodes,AgentRun3BGNodes",
-    "PEGA BackgroundProcessing,<br>AgentRun2BGNodes,AgentRun3BGNodes",
-    "PEGA PDM Node", "PEGA WebUser Node",
-    "SPS Core Service F5 Pool Status", "SPS Core Service F5", "SPS Core Service Node URL",
-    "PARES Core Service F5 Pool Status", "PARES Core Service F5 URL", "PARES Core Service Node URL",
-    "UIX Core Service F5 Pool Status", "UIX Core Service F5", "UIX Core Service Node URL",
-    "Provider360 PDS Services F5 Pool Status", "Provider360 PDS Services F5",
-    "Provider360 PDS Services Node URL",
-    "SPSDARTUI F5 Pool Status", "SPSDARTUI F5",
-    "PKM F5 Pool Status", "PKM Node URL",
-    "UIX F5 Pool Status", "UIX F5", "UIX Node URL",
-    "Roster Automation F5 Pool Status", "Roster Automation F5", "Roster Automation Node URL",
-    "Prov360 F5 Pool Status",
-    "SPS ProvRestore F5 Pool Status", "SPS ProvRestore F5",
-    "SPS Audit History F5 Pool Status", "SPS Audit History F5",
-    "MATCH SERVER Inspector URL", "MATCH SERVER Console URL",
-    "NETWORKAIprov360", "OEM", "PDT", "BPD", "F5 Portal", "AppviewX Dashboard", "PARESOld Node"
-]
-
-# Sort results based on preferred order
-def sort_key(res):
+    Validate API key from request header
+    """
+    if api_key != API_KEY:
+        raise HTTPException(
+            status_code=403,
+            detail="Invalid or missing API Key"
+        )
+    return api_key
+ 
+ 
+@app.get("/password")
+def get_password(
+    api_key: str = Depends(get_api_key),
+    appid: str = Query(..., description="Application ID"),
+    safe: str = Query(..., description="Safe name"),
+    object_name: str = Query(..., description="Object name"),
+):
+    """
+    Retrieve password from CyberArk CLI (API Key authentication required)
+   
+    Headers:
+        X-API-Key: Your API key for authentication
+    """
+ 
+    query = f"Safe={safe};Folder=Root;Object={object_name}"
+ 
     try:
-        return preferred_order.index(res['Env Type'])
-    except ValueError:
-        return len(preferred_order) + 1
-
-merged_results.sort(key=sort_key)
-
-
-# ================== End Time & Duration ==================
-end_ist = datetime.now(IST).replace(microsecond=0)
-end_et = end_ist.astimezone(ET)
-duration = end_ist - start_ist
-hours, rem = divmod(int(duration.total_seconds()), 3600)
-minutes, seconds = divmod(rem, 60)
-duration_str = f"{hours}h {minutes}m {seconds}s"
-
-total_urls = len(tasks)
-up_count = sum(1 for r in raw_results if r['IsUP'])
-down_count = total_urls - up_count
-
-print(f"\n🏁 Finished at: {end_ist.strftime(fmt)} / {end_et.strftime(fmt)}")
-print(f"⏱️ Duration: {duration_str}")
-print(f"📊 Summary: {up_count}/{total_urls} UP ({round((up_count/total_urls)*100, 2)}%)\n")
-
-# ================== Send Email ==================
-send_outlook_mail(raw_results, start_et, end_et, duration_str, total_urls, up_count, down_count)
+        password_cmd = [
+            CLI_PATH,
+            "GetPassword",
+            "-p", f"AppDescs.AppID={appid}",
+            "-p", f"Query={query}",
+            "-o", "Password"
+        ]
+ 
+        password_output = subprocess.check_output(
+            password_cmd,
+            universal_newlines=True
+        ).strip()
+ 
+        # Encrypt the password before returning
+        encrypted_password = encrypt_password(password_output)
+ 
+        return {
+            "appid": appid,
+            "safe": safe,
+            "object_name": object_name,
+            "encrypted_password": encrypted_password
+        }
+ 
+    except subprocess.CalledProcessError as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error executing CLI command: {str(e)}"
+        )
+ 
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=500,
+            detail=f"CyberArk CLI not found at {CLI_PATH}"
+        )
+ 
+ 
+@app.post("/decrypt")
+def decrypt_endpoint(
+    api_key: str = Depends(get_api_key),
+    encrypted_password: str = Query(..., description="Encrypted password to decrypt"),
+    decryption_key: str = Query(..., description="Decryption key (32 characters)")
+):
+    """
+    Decrypt an encrypted password (API Key authentication required)
+   
+    Headers:
+        X-API-Key: Your API key for authentication
+   
+    Parameters:
+        encrypted_password: The encrypted password to decrypt
+        decryption_key: The 32-character key used for decryption
+    """
+   
+    try:
+        # Create cipher from the provided decryption key
+        decrypt_cipher = get_cipher_from_key(decryption_key)
+       
+        print(f"Attempting to decrypt with key: {decryption_key[:10]}...")  # Debug log
+        print(f"Encrypted password: {encrypted_password[:50]}...")  # Debug log
+       
+        encrypted_bytes = base64.urlsafe_b64decode(encrypted_password.encode())
+        decrypted_password = decrypt_cipher.decrypt(encrypted_bytes)
+       
+        return {
+            "decrypted_password": decrypted_password.decode()
+        }
+    except Exception as e:
+        print(f"Decryption error: {str(e)}")  # Debug log
+        raise HTTPException(
+            status_code=400,
+            detail=f"Decryption failed: {str(e)}"
+        )
