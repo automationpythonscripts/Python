@@ -1,189 +1,243 @@
-from fastapi import FastAPI, HTTPException, Query, Depends, Security
+(spscyberarkpoc) [an453200ad@va10tlvpeg358 restapi]$ cat main.py 
+import os
+import subprocess
+import logging
+import time
+import json
+from datetime import datetime
+from base64 import b64encode
+from typing import Dict
+from dotenv import load_dotenv
+
+from fastapi import Header, HTTPException, Security
+from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.security import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
-import subprocess
-import os
-from typing import Optional
-from cryptography.fernet import Fernet
-import base64
-from dotenv import load_dotenv
- 
-# Load environment variables from .env file
+from pydantic import BaseModel, Field
+from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+
+# ========================= CONFIG =========================
 load_dotenv()
- 
-app = FastAPI()
- 
-# Add CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Restrict to specific domains in production
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
- 
-# CyberArk CLI path
-CLI_PATH = "/opt/CARKaim/sdk/clipasswordsdk"
- 
-# API Key configuration
-API_KEY_NAME = "X-API-Key"
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("cyberark-agent")
+audit_logger = logging.getLogger("cyberark-audit") # Keep your existing audit setup
+
+app = FastAPI(title="CyberArk Password Agent - Asymmetric Encryption")
+
+# Rate limiter, CORS, API Key (keep your existing config)
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 API_KEY = os.getenv("CYBERARK_API_KEY")
-if not API_KEY:
-    raise ValueError("CYBERARK_API_KEY environment variable is required")
-api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=True)
- 
-# Encryption configuration
-ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
-if not ENCRYPTION_KEY:
-    raise ValueError("ENCRYPTION_KEY environment variable is required")
-# Ensure the key is 32 bytes for Fernet
-if len(ENCRYPTION_KEY.encode()) != 32:
-    # Pad or truncate to 32 bytes
-    key_bytes = ENCRYPTION_KEY.encode()[:32].ljust(32, b'0')
-else:
-    key_bytes = ENCRYPTION_KEY.encode()
- 
-print(f"Using encryption key (first 10 chars): {ENCRYPTION_KEY[:10]}...")  # Debug log
-print(f"Key length: {len(key_bytes)} bytes")  # Debug log
- 
-# Convert to Fernet compatible key
-fernet_key = base64.urlsafe_b64encode(key_bytes)
-cipher = Fernet(fernet_key)
- 
- 
-def get_cipher_from_key(decryption_key: str) -> Fernet:
-    """Create a Fernet cipher from a decryption key"""
-    # Ensure the key is 32 bytes for Fernet
-    if len(decryption_key.encode()) != 32:
-        # Pad or truncate to 32 bytes
-        key_bytes = decryption_key.encode()[:32].ljust(32, b'0')
-    else:
-        key_bytes = decryption_key.encode()
-   
-    # Convert to Fernet compatible key
-    fernet_key = base64.urlsafe_b64encode(key_bytes)
-    return Fernet(fernet_key)
- 
- 
-def encrypt_password(password: str) -> str:
-    """Encrypt a password using Fernet symmetric encryption"""
-    encrypted_password = cipher.encrypt(password.encode())
-    return base64.urlsafe_b64encode(encrypted_password).decode()
- 
- 
-def decrypt_password(encrypted_password: str) -> str:
-    """Decrypt a password using Fernet symmetric encryption"""
-    try:
-        print(f"Attempting to decrypt: {encrypted_password[:50]}...")  # Debug log
-        encrypted_bytes = base64.urlsafe_b64decode(encrypted_password.encode())
-        decrypted_password = cipher.decrypt(encrypted_bytes)
-        return decrypted_password.decode()
-    except Exception as e:
-        print(f"Decryption error: {str(e)}")  # Debug log
-        raise HTTPException(
-            status_code=400,
-            detail=f"Failed to decrypt password: {str(e)}"
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=True)
+
+# ========================= PUBLIC KEY =========================
+# Load source server's public key (PEM format)
+PUBLIC_KEY_PATH = os.getenv("SOURCE_PUBLIC_KEY_PATH", "/local_home/an453200ad/public_key.pem")
+
+try:
+    with open(PUBLIC_KEY_PATH, "rb") as f:
+        public_key = serialization.load_pem_public_key(f.read())
+    logger.info("Source public key loaded successfully")
+except Exception as e:
+    raise ValueError(f"Failed to load public key: {e}")
+
+# CLI settings (keep your existing)
+CLI_PATH = "/opt/CARKaim/sdk/clipasswordsdk"
+CLI_TIMEOUT = 10
+
+# ========================= MODELS =========================
+class PasswordRequest(BaseModel):
+    appid: str = Field(..., min_length=1, max_length=100)
+    safe: str = Field(..., min_length=1, max_length=100)
+    object_name: str = Field(..., min_length=1, max_length=200)
+
+# ========================= HELPER - Hybrid Encryption =========================
+def hybrid_encrypt(password: str, public_key) -> str:
+    """Hybrid: RSA encrypts AES key + AES encrypts password"""
+    # Generate random AES-256-GCM key
+    aes_key = os.urandom(32)
+    aesgcm = AESGCM(aes_key)
+    nonce = os.urandom(12)
+
+    # Encrypt password with AES
+    ciphertext = aesgcm.encrypt(nonce, password.encode(), None)
+
+    # Encrypt AES key with RSA public key (OAEP)
+    encrypted_aes_key = public_key.encrypt(
+        aes_key,
+        padding.OAEP(
+            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
+            label=None
         )
- 
- 
-async def get_api_key(api_key: str = Security(api_key_header)):
-    """
-    Validate API key from request header
-    """
-    if api_key != API_KEY:
-        raise HTTPException(
-            status_code=403,
-            detail="Invalid or missing API Key"
-        )
-    return api_key
- 
- 
+    )
+
+    # Combine: encrypted_aes_key + nonce + ciphertext
+    combined = encrypted_aes_key + nonce + ciphertext
+    return b64encode(combined).decode()
+
+# ========================= ENDPOINT =========================
 @app.get("/password")
+@limiter.limit("30/minute")
 def get_password(
-    api_key: str = Depends(get_api_key),
-    appid: str = Query(..., description="Application ID"),
-    safe: str = Query(..., description="Safe name"),
-    object_name: str = Query(..., description="Object name"),
+    request: Request,
+    payload: PasswordRequest = Depends(),
+    api_key: str = Depends(lambda x: x if x == API_KEY else None), # Simplified
 ):
-    """
-    Retrieve password from CyberArk CLI (API Key authentication required)
-   
-    Headers:
-        X-API-Key: Your API key for authentication
-    """
- 
-    query = f"Safe={safe};Folder=Root;Object={object_name}"
- 
+    start_time = time.time()
+    source_ip = request.client.host if request.client else "unknown"
+
+    if api_key is None:
+        raise HTTPException(status_code=403, detail="Invalid API Key")
+
     try:
-        password_cmd = [
-            CLI_PATH,
-            "GetPassword",
-            "-p", f"AppDescs.AppID={appid}",
-            "-p", f"Query={query}",
-            "-o", "Password"
-        ]
- 
-        password_output = subprocess.check_output(
-            password_cmd,
-            universal_newlines=True
-        ).strip()
- 
-        # Encrypt the password before returning
-        encrypted_password = encrypt_password(password_output)
- 
+        # Fetch from CyberArk CLI (your existing logic)
+        query = f"Safe={payload.safe};Folder=Root;Object={payload.object_name}"
+        password_cmd = [CLI_PATH, "GetPassword", "-p", f"AppDescs.AppID={payload.appid}", "-p", f"Query={query}", "-o", "Password"]
+
+        password_output = subprocess.check_output(password_cmd, universal_newlines=True, timeout=CLI_TIMEOUT).strip()
+
+        if not password_output:
+            raise HTTPException(status_code=404, detail="No password returned")
+
+        # Encrypt using hybrid + source public key
+        encrypted_data = hybrid_encrypt(password_output, public_key)
+
+        duration = (time.time() - start_time) * 1000
+
+        # Audit log (keep your existing audit function)
+        # log_audit_event(...) 
+
         return {
-            "appid": appid,
-            "safe": safe,
-            "object_name": object_name,
-            "encrypted_password": encrypted_password
+            "appid": payload.appid,
+            "safe": payload.safe,
+            "object_name": payload.object_name,
+            "encrypted_password": encrypted_data # Now hybrid encrypted
         }
- 
-    except subprocess.CalledProcessError as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error executing CLI command: {str(e)}"
-        )
- 
-    except FileNotFoundError:
-        raise HTTPException(
-            status_code=500,
-            detail=f"CyberArk CLI not found at {CLI_PATH}"
-        )
- 
- 
-@app.post("/decrypt")
-def decrypt_endpoint(
-    api_key: str = Depends(get_api_key),
-    encrypted_password: str = Query(..., description="Encrypted password to decrypt"),
-    decryption_key: str = Query(..., description="Decryption key (32 characters)")
-):
-    """
-    Decrypt an encrypted password (API Key authentication required)
-   
-    Headers:
-        X-API-Key: Your API key for authentication
-   
-    Parameters:
-        encrypted_password: The encrypted password to decrypt
-        decryption_key: The 32-character key used for decryption
-    """
-   
-    try:
-        # Create cipher from the provided decryption key
-        decrypt_cipher = get_cipher_from_key(decryption_key)
-       
-        print(f"Attempting to decrypt with key: {decryption_key[:10]}...")  # Debug log
-        print(f"Encrypted password: {encrypted_password[:50]}...")  # Debug log
-       
-        encrypted_bytes = base64.urlsafe_b64decode(encrypted_password.encode())
-        decrypted_password = decrypt_cipher.decrypt(encrypted_bytes)
-       
-        return {
-            "decrypted_password": decrypted_password.decode()
-        }
+
     except Exception as e:
-        print(f"Decryption error: {str(e)}")  # Debug log
-        raise HTTPException(
-            status_code=400,
-            detail=f"Decryption failed: {str(e)}"
+        # Your existing error handling + audit
+        raise HTTPException(status_code=500, detail="Failed to retrieve password")
+
+# Health check endpoint
+@app.get("/health")
+def health():
+    #return {"status": "healthy"}
+    return "healthy"
+
+# Optional: Add security headers middleware
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
+
+
+((cyberarkclient) ) [an453200ad@va10dlvsps301 restapi]$ cat main.py 
+import requests
+import os
+import time
+import base64
+from typing import Dict
+from dotenv import load_dotenv
+from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from pydantic import BaseModel
+
+load_dotenv()
+
+AGENT_URL = os.getenv("AGENT_URL", "http://10.22.147.198:18081/").rstrip("/")
+SOURCE_API_KEY = os.getenv("CYBERARK_API_KEY")
+PRIVATE_KEY_PATH = os.getenv("PRIVATE_KEY_PATH", "/local_home/an453200ad/private_key.pem")  # Keep this secure!
+
+# Load private key once
+with open(PRIVATE_KEY_PATH, "rb") as f:
+    private_key = serialization.load_pem_private_key(f.read(), password=None)
+
+class AgentResponse(BaseModel):
+    appid: str
+    safe: str
+    object_name: str
+    encrypted_password: str
+
+def hybrid_decrypt(encrypted_b64: str) -> str:
+    """Decrypt hybrid RSA+AES data"""
+    combined = base64.b64decode(encrypted_b64)
+
+    # Split: RSA encrypted AES key (256 bytes for 2048-bit) + nonce (12) + ciphertext
+    rsa_size = 256  # Adjust if using 4096-bit (512)
+    encrypted_aes_key = combined[:rsa_size]
+    nonce = combined[rsa_size:rsa_size+12]
+    ciphertext = combined[rsa_size+12:]
+
+    # Decrypt AES key with private key
+    aes_key = private_key.decrypt(
+        encrypted_aes_key,
+        padding.OAEP(
+            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
+            label=None
         )
+    )
+
+    # Decrypt password with AES-GCM
+    aesgcm = AESGCM(aes_key)
+    plaintext = aesgcm.decrypt(nonce, ciphertext, None)
+    return plaintext.decode("utf-8")
+
+def fetch_password_from_agent(appid: str, safe: str, object_name: str) -> Dict:
+    url = f"{AGENT_URL}/password"
+    headers = {"X-API-Key": SOURCE_API_KEY, "Accept": "application/json"}
+    params = {"appid": appid, "safe": safe, "object_name": object_name, "x": str(int(time.time()))} # Sending current timestamp as 'x'
+    response = requests.get(url, headers=headers, params=params, timeout=15)
+    if response.status_code == 422:
+        print(f"Validation Error Details: {response.json()}")  # Crucial for debugging
+    response.raise_for_status()
+    data = response.json()
+    validated = AgentResponse(**data)
+    plain_password = hybrid_decrypt(validated.encrypted_password)
+
+    return {
+        "appid": validated.appid,
+        "safe": validated.safe,
+        "object_name": validated.object_name,
+        "decrypted_password": plain_password
+    }
+
+# Usage
+if __name__ == "__main__":
+    result = fetch_password_from_agent("App_SPS_QA", "SVC-spsinfra_QA", "srplmsps-va33tlvatc314.wellpoint.com")
+    print("Password:", result["decrypted_password"])
+
+((cyberarkclient) ) [an453200ad@va10dlvsps301 restapi]$ python main.py 
+Traceback (most recent call last):
+  File "/local_home/an453200ad/restapi/main.py", line 74, in <module>
+    result = fetch_password_from_agent("App_SPS_QA", "SVC-spsinfra_QA", "srplmsps-va33tlvatc314.wellpoint.com")
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/local_home/an453200ad/restapi/main.py", line 60, in fetch_password_from_agent
+    response.raise_for_status()
+  File "/local_home/an453200ad/restapi/cyberarkclient/lib64/python3.12/site-packages/requests/models.py", line 1028, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 403 Client Error: Forbidden for url: http://10.22.147.198:18081/password?appid=App_SPS_QA&safe=SVC-spsinfra_QA&object_name=srplmsps-va33tlvatc314.wellpoint.com&x=1775635404
+
+((cyberarkclient) ) [an453200ad@va10dlvsps301 restapi]$ python main.py 
+Traceback (most recent call last):
+  File "/local_home/an453200ad/restapi/main.py", line 74, in <module>
+    result = fetch_password_from_agent("App_SPS_QA", "SVC-spsinfra_QA", "srplmsps-va33tlvatc314.wellpoint.com")
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/local_home/an453200ad/restapi/main.py", line 59, in fetch_password_from_agent
+    response.raise_for_status()
+  File "/local_home/an453200ad/restapi/cyberarkclient/lib64/python3.12/site-packages/requests/models.py", line 1028, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 422 Client Error: Unprocessable Entity for url: http://10.22.147.198:18081/password?appid=App_SPS_QA&safe=SVC-spsinfra_QA&object_name=srplmsps-va33tlvatc314.wellpoint.com
