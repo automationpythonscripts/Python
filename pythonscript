@@ -1,1 +1,259 @@
+issue
 
+(spscyberarkpoc) [an453200ad@va10tlvpeg358 restapi]$ cat main.py 
+import os
+import subprocess
+import logging
+import time
+from datetime import datetime
+from base64 import b64encode
+from typing import Dict
+
+from fastapi import FastAPI, HTTPException, Request, Depends
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+import uvicorn
+import ssl
+
+# ========================= CONFIG =========================
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("cyberark-agent")
+
+app = FastAPI(title="CyberArk Password Agent - mTLS + Asymmetric Encryption")
+
+# Allowed client certificate subject (for extra validation)
+ALLOWED_CLIENT_CN = "source-client.wellpoint.com" # Change to match your client cert CN
+
+# CLI Configuration
+CLI_PATH = "/opt/CARKaim/sdk/clipasswordsdk"
+CLI_TIMEOUT = 10
+
+# ========================= mTLS SSL CONTEXT =========================
+def create_ssl_context():
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(certfile="server.crt", keyfile="server.key") # Server cert + key
+    ctx.load_verify_locations(cafile="ca.crt") # CA to verify client certs
+    ctx.verify_mode = ssl.CERT_REQUIRED # Enforce client certificate
+    ctx.check_hostname = False # Usually False for internal services
+    return ctx
+
+# ========================= MODELS =========================
+class PasswordRequest(BaseModel):
+    appid: str = Field(..., min_length=1, max_length=100)
+    safe: str = Field(..., min_length=1, max_length=100)
+    object_name: str = Field(..., min_length=1, max_length=200)
+
+# Hybrid encryption helper (same as previous asymmetric version)
+def hybrid_encrypt(password: str, public_key) -> str:
+    # ... (keep the same hybrid_encrypt function from previous response)
+    pass # Replace with your hybrid_encrypt code
+
+# Load source public key for encryption (keep as before)
+# PUBLIC_KEY_PATH = ...
+# with open(PUBLIC_KEY_PATH, "rb") as f:
+# public_key = serialization.load_pem_public_key(f.read())
+
+# ========================= DEPENDENCY - mTLS Client Validation =========================
+def verify_client_cert(request: Request):
+    """Extract and validate client certificate from TLS connection"""
+    peer_cert = request.scope.get("ssl_object") # Available when running with custom SSLContext
+    if not peer_cert:
+        # Fallback: Try transport info if using uvicorn with ssl_context
+        transport = request.scope.get("transport")
+        if transport and hasattr(transport, "get_extra_info"):
+            ssl_object = transport.get_extra_info("ssl_object")
+            if ssl_object:
+                peer_cert = ssl_object.getpeercert()
+    
+    if not peer_cert:
+        raise HTTPException(status_code=403, detail="Client certificate required")
+    
+    # Extract Common Name (CN) for validation
+    subject = dict(x[0] for x in peer_cert.get("subject", []))
+    client_cn = subject.get("commonName")
+    
+    logger.info(f"Client certificate CN: {client_cn}")
+    
+    if client_cn != ALLOWED_CLIENT_CN:
+        logger.warning(f"Unauthorized client certificate: {client_cn}")
+        raise HTTPException(status_code=403, detail="Unauthorized client certificate")
+    
+    return client_cn
+
+# ========================= ENDPOINT =========================
+@app.get("/password")
+def get_password(
+    request: Request,
+    payload: PasswordRequest = Depends(),
+    client_cn: str = Depends(verify_client_cert)
+):
+    start_time = time.time()
+
+    try:
+        query = f"Safe={payload.safe};Folder=Root;Object={payload.object_name}"
+        password_cmd = [
+            CLI_PATH, "GetPassword",
+            "-p", f"AppDescs.AppID={payload.appid}",
+            "-p", f"Query={query}",
+            "-o", "Password"
+        ]
+
+        password_output = subprocess.check_output(
+            password_cmd, universal_newlines=True, timeout=CLI_TIMEOUT
+        ).strip()
+
+        if not password_output:
+            raise HTTPException(status_code=404, detail="No password returned")
+
+        # Encrypt with source server's public key (hybrid)
+        encrypted_data = hybrid_encrypt(password_output, public_key)
+
+        duration_ms = (time.time() - start_time) * 1000
+        logger.info(f"Password fetched for {payload.appid}/{payload.safe} by client {client_cn}")
+
+        return {
+            "appid": payload.appid,
+            "safe": payload.safe,
+            "object_name": payload.object_name,
+            "encrypted_password": encrypted_data
+        }
+
+    except Exception as e:
+        logger.error(f"Error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve password")
+
+# Health check
+@app.get("/health")
+def health():
+    return {"status": "healthy"}
+
+# ========================= RUN =========================
+if __name__ == "__main__":
+    # Note: You no longer need to call create_ssl_context() 
+    # unless you are extracting the file paths from it.
+    
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8443,
+        ssl_keyfile="server.key",   # Path to your private key
+        ssl_certfile="server.crt", # Path to your certificate
+        ssl_ca_certs="ca.crt",     # For mTLS: Path to the CA that signs client certs
+        ssl_cert_reqs=2,                        # For mTLS: 2 = ssl.CERT_REQUIRED
+        log_level="info"
+    )
+
+(spscyberarkpoc) [an453200ad@va10tlvpeg358 restapi]$ ll
+total 64
+-rw-rw-r-- 1 an453200ad an453200ad 8777 Apr  4 16:23 audit.log
+-rw-rw-r-- 1 an453200ad an453200ad 1838 Apr  8 06:18 ca.crt
+-rw------- 1 an453200ad an453200ad 3247 Apr  8 06:17 ca.key
+-rw-rw-r-- 1 an453200ad an453200ad   41 Apr  8 06:25 ca.srl
+-rw-r--r-- 1 an453200ad an453200ad 1724 Apr  8 07:39 client.crt
+-rw------- 1 an453200ad an453200ad 3243 Apr  8 07:39 client.key
+-rw-rw-r-- 1 an453200ad an453200ad  687 Apr  8 07:41 gunicorn.log
+-rwxr-xr-x 1 an453200ad an453200ad 5575 Apr  8 07:33 main.py
+-rw------- 1 an453200ad an453200ad  872 Apr  3 08:08 nohup.out
+drwxrwxr-x 2 an453200ad an453200ad   59 Apr  8 07:35 __pycache__
+-rwxr-xr-x 1 an453200ad an453200ad   16 Mar 19 12:27 requirement.py
+-rw-rw-r-- 1 an453200ad an453200ad 1728 Apr  8 06:25 server.crt
+-rw-rw-r-- 1 an453200ad an453200ad 1610 Apr  8 06:24 server.csr
+-rw------- 1 an453200ad an453200ad 3243 Apr  8 06:24 server.key
+drwxrwxr-x 5 an453200ad an453200ad   94 Apr  3 05:42 spscyberarkpoc
+
+
+((cyberarkclient) ) [an453200ad@va10dlvsps301 restapi]$ cat main.py 
+import requests
+import os
+from dotenv import load_dotenv
+from typing import Dict
+
+load_dotenv()
+
+AGENT_URL = os.getenv("AGENT_URL", "http://10.22.147.198:18081").rstrip("/")
+
+# mTLS certificate paths
+CLIENT_CERT = ("/local_home/an453200ad/mltsauthenticationkeyscerts/client.crt", "/local_home/an453200ad/mltsauthenticationkeyscerts/client.key") # (cert, key) tuple
+CA_CERT = "/local_home/an453200ad/mltsauthenticationkeyscerts/ca.crt" # Verify agent's server certificate
+
+def fetch_password_from_agent(appid: str, safe: str, object_name: str) -> Dict:
+    url = f"{AGENT_URL}/password"
+    params = {"appid": appid, "safe": safe, "object_name": object_name}
+
+    try:
+        response = requests.get(
+            url,
+            params=params,
+            cert=CLIENT_CERT, # Client certificate + key
+            verify=CA_CERT, # Verify server certificate
+            timeout=15
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        # Decrypt using your private key (hybrid_decrypt from previous version)
+        plain_password = hybrid_decrypt(data["encrypted_password"]) # Implement as before
+
+        return {
+            "appid": data["appid"],
+            "safe": data["safe"],
+            "object_name": data["object_name"],
+            "decrypted_password": plain_password
+        }
+
+    except requests.exceptions.SSLError as e:
+        raise RuntimeError(f"mTLS handshake failed: {e}")
+    except Exception as e:
+        raise RuntimeError(f"Request failed: {e}")
+
+# Usage
+if __name__ == "__main__":
+    result = fetch_password_from_agent("App_SPS_QA", "SVC-spsinfra_QA", "srplmsps-va33tlvatc314.wellpoint.com")
+    print("Password:", result["decrypted_password"])
+
+
+((cyberarkclient) ) [an453200ad@va10dlvsps301 restapi]$ cat .env
+
+# Agent Server Configuration
+AGENT_URL=http://10.22.147.198:18081
+
+((cyberarkclient) ) [an453200ad@va10dlvsps301 ~]$ cd mltsauthenticationkeyscerts/
+((cyberarkclient) ) [an453200ad@va10dlvsps301 mltsauthenticationkeyscerts]$ ll
+total 24
+-rw-r--r-- 1 an453200ad an453200ad 1838 Apr  8 06:21 ca.crt
+-rw------- 1 an453200ad an453200ad 3247 Apr  8 06:21 ca.key
+-rw-r--r-- 1 an453200ad an453200ad   41 Apr  8 06:26 ca.srl
+-rw-r--r-- 1 an453200ad an453200ad 1724 Apr  8 06:26 client.crt
+-rw-r--r-- 1 an453200ad an453200ad 1610 Apr  8 06:26 client.csr
+-rw------- 1 an453200ad an453200ad 3243 Apr  8 06:25 client.key
+
+
+
+http://10.22.147.198:18081/docs#/default/get_password_password_get
+
+Curl
+
+curl -X 'GET' \
+  'http://10.22.147.198:18081/password?appid=App_SPS_QA&safe=SVC-spsinfra_QA&object_name=srplmsps-va33tlvatc314.wellpoint.com' \
+  -H 'accept: application/json'
+Request URL
+http://10.22.147.198:18081/password?appid=App_SPS_QA&safe=SVC-spsinfra_QA&object_name=srplmsps-va33tlvatc314.wellpoint.com
+Server response
+Code	Details
+403
+Undocumented
+Error: Forbidden
+
+Response body
+Download
+{
+  "detail": "Client certificate required"
+}
+Response headers
+ content-length: 40 
+ content-type: application/json 
+ date: Wed,08 Apr 2026 11:42:09 GMT 
+ server: uvicorn 
