@@ -1,1 +1,260 @@
+import paramiko
+import sys
+import os
+import logging
+import win32com.client as win32
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from typing import List, Dict
+
+# ====================== CONFIGURATION ======================
+
+@dataclass
+class AppServers:
+    name: str
+    servers: List[str]
+
+# === SERVER INVENTORY ===
+INVENTORY: List[AppServers] = [
+    AppServers("PEGA", [
+        "VA10PLVPEG516","VA10PLVPEG517","VA10PLVPEG518",
+        "DC04PLVPEG391","DC04PLVPEG392","DC04PLVPEG393","DC04PLVPEG394","DC04PLVPEG395",
+        "DC04PLVPEG396","DC04PLVPEG397","DC04PLVPEG398","DC04PLVPEG399","DC04PLVPEG400",
+        "DC04PLVPEG401","DC04PLVPEG402","DC04PLVPEG403","DC04PLVPEG404","DC04PLVPEG405"
+    ]),
+    AppServers("SPS/PARES/UIX Core Services", [
+        "VA10PLVWBS628","VA10PLVWBS629","VA10PLVWBS630","VA10PLVWBS744","VA10PLVWBS745",
+        "VA10PLVWBS746","VA10PLVWBS747","VA10PLVWBS748","VA10PLVWBS749","VA10PLVWBS750",
+        "VA10PLVWBS751","VA10PLVWBS752"
+    ]),
+    AppServers("UIX", ["DC04PLVWBS321", "DC04PLVWBS322"]),
+    AppServers("DARTUI", [
+        "DC04PLVWBS323","DC04PLVWBS324"
+    ]),
+    AppServers("PKM", [
+        "DC04PLVWBS371","DC04PLVWBS372","DC04PLVWBS373","DC04PLVWBS374"
+    ]),
+    AppServers("Roster Automation", [
+        "DC04PLVSPS300","DC04PLVSPS301","VA10PLVPEG360","VAAZPLVSPS300","VAAZPLVSPS301"
+    ]),
+    AppServers("SPS MDM Python Servers", ["VA10PLVSPS300","VA10PLVSPS301"]),
+    AppServers("MDM/Match", ["VA10PLVWBS687","VA10PLVWBS688"]),
+    AppServers("Provider360 PDS", ["VA10PLVWBS669"]),
+    AppServers("Prov360/ProvRestore/SPSAudit", ["VA10PLVWBS669","VA10PLVWBS670"]),
+    AppServers("PDT", ["DC04PLVCFE305"]),
+    AppServers("BPD", ["DC04PLVCFE306"]),
+    AppServers("KAFKA", ["VA10PLVKAF312","VA10PLVKAF313"]),
+    AppServers("PARES Inactive", ["VA10PLVWBS670","VA10PLVIHS554","VA10PLVIHS555"]),
+    AppServers("CoreServices Inactive", ["VA10PLVWBS761","VA10PLVWBS762"]),
+    AppServers("PEGA Inactive", ["VA10PLVPEG361","VA10PLVPEG362","VA10PLVPEG363","VA10PLVPEG447",
+        "VA10PLVPEG448","VA10PLVPEG449","VA10PLVPEG460","VA10PLVPEG461","VA10PLVPEG462",
+        "VA10PLVPEG463","VA10PLVPEG493","VA10PLVPEG494","VA10PLVPEG495","VA10PLVPEG496",
+        "VA10PLVPEG497","VA10PLVPEG498","VA10PLVPEG552","VA10PLVPEG553"]),
+    AppServers("Sanctioned Provider System Inactive", ["DC04PLVSPS302","DC04PLVSPS303"]),
+]
+
+# SSH Credentials (Password-based)
+SSH_USER = "an453200ad" # ← Change
+SSH_PASS = "LyYI#4M26%beRjy%6mRv" # Change this - Better to use environment variable
+
+# Alternative: Read password from environment variable (more secure)
+# SSH_PASS = os.getenv("SSH_PASS")
+
+TIMEOUT = 15
+MAX_WORKERS = 10 # Number of parallel SSH connections
+
+ORACLE_JDK_PATH = "/apps/oracle/product/19.3/19c_Full/jdk/bin/java"
+
+# Email Configuration
+EMAIL_TO = "Sure, Venkatesh <Venkatesh.Sure@carelon.com>"
+EMAIL_CC = "Sure, Venkatesh <Venkatesh.Sure@carelon.com>"
+#EMAIL_TO = "Singh, Sushant <sushant.singh@example.com>"
+#EMAIL_CC = "dl-T-SPS-Infrastructure-offshore@example.com"
+EMAIL_SUBJECT = "Java and JRE Version Verification Report"
+
+# ====================== LOGGING ======================
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# ====================== CORE FUNCTIONS ======================
+def get_java_version(ssh: paramiko.SSHClient, command: str) -> str:
+    """Get System Java version by running java -version command."""
+    try:
+        _, stdout, stderr = ssh.exec_command(f"{command} -version", timeout=10)
+        output = stderr.read().decode('utf-8').strip() or stdout.read().decode('utf-8').strip()
+        
+        if not output:
+            return "Java Not Available"
+        
+        # Return first line only and clean it
+        first_line = output.splitlines()[0].strip()
+        return first_line.replace('"', '')
+        
+    except Exception as e:
+        logger.debug(f"Java version check failed for {command}: {e}")
+        return "Error"
+
+def check_server(server: str, app_name: str) -> Dict:
+    """Connect to a single server and check System and Application Java versions."""
+    row = {
+        "Application": app_name,
+        "Server": server,
+        "Default Java/JRE": "Not Checked",
+        "Oracle JDK 19c": "Not Checked"
+    }
+    
+    try:
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        
+        logger.info(f"Connecting to {server}...")
+        ssh.connect(
+            hostname=server,
+            username=SSH_USER,
+            password=SSH_PASS,
+            timeout=TIMEOUT,
+            banner_timeout=TIMEOUT,
+            auth_timeout=TIMEOUT,
+            allow_agent=False, # Disable SSH agent
+            look_for_keys=False # Disable key lookup
+        )
+        
+        # Check both Java versions
+        row["Default Java/JRE"] = get_java_version(ssh, "java")
+        row["Oracle JDK 19c"] = get_java_version(ssh, ORACLE_JDK_PATH)
+        
+        ssh.close()
+        logger.info(f"✅ Successfully audited {server}")
+        
+    except paramiko.AuthenticationException:
+        row["Default Java/JRE"] = "Authentication Failed"
+        row["Oracle JDK 19c"] = "Authentication Failed"
+        logger.error(f"❌ Authentication failed on {server}")
+    except Exception as e:
+        error_msg = str(e).splitlines()[0] if str(e) else "Connection Failed"
+        row["Default Java/JRE"] = f"Failed: {error_msg[:50]}"
+        row["Oracle JDK 19c"] = f"Failed: {error_msg[:50]}"
+        logger.error(f"❌ Failed to connect to {server}: {error_msg}")
+    
+    return row
+
+
+def run_audit() -> List[Dict]:
+    """Run audit on all servers using parallel execution."""
+    results = []
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = [executor.submit(check_server, server, app.name) 
+                  for app in INVENTORY for server in app.servers]
+        
+        for future in as_completed(futures):
+            results.append(future.result())
+    return results
+
+
+def create_custom_html_table(data: List[Dict]) -> str:
+    """Create HTML table with rowspan"""
+    html = """
+    <table border="1" cellpadding="8" cellspacing="0" style="border-collapse: collapse; width:100%; font-family: Calibri, Arial, sans-serif;">
+        <thead>
+            <tr style="background-color: #2E7D32; color: white;">
+                <th style="text-align:center;">Application</th>
+                <th style="text-align:left;">Server's</th>
+                <th style="text-align:left;">System Java/JRE Version</th>
+                <th style="text-align:left;">Application Java/JRE Version</th>
+            </tr>
+        </thead>
+        <tbody>
+    """
+    
+    current_app = None
+    rowspan = 0
+    rows = ""
+    
+    for row in data:
+        if row["Application"] != current_app:
+            if rowspan > 0:
+                rows = rows.replace("{{rowspan}}", str(rowspan), 1)
+            current_app = row["Application"]
+            rowspan = 1
+            rows += f"""
+            <tr>
+                <td rowspan="{{rowspan}}" style="background-color: #E8F5E9; font-weight: bold; text-align:center; vertical-align: middle;">{row['Application']}</td>
+                <td>{row['Server']}</td>
+                <td>{row['Python Version']}</td>
+            </tr>
+            """
+        else:
+            rowspan += 1
+            rows += f"""
+            <tr>
+                <td>{row['Server']}</td>
+                <td>{row['System Java/JRE Version']}</td>
+                <td>{row['Application Java/JRE Version']}</td>
+            </tr>
+            """
+    
+    # Close last rowspan
+    if rowspan > 0:
+        rows = rows.replace("{{rowspan}}", str(rowspan), 1)
+    
+    html += rows + "</tbody></table>"
+    return html
+
+
+def send_outlook_email(data: List[Dict]):
+    html_table = create_custom_html_table(data)
+    
+    body = f"""
+    <html>
+    <body style="font-family: Calibri, Arial, sans-serif;">
+        <h2 style="color:#2E7D32;">Java Version Verification Report</h2>
+        <p>Hi Team,</p>
+        <p>As part of the Java upgrade activity, here is the latest Java verification report across Prod SPS Servers:</p>
+        {html_table}
+        <p><b>Regards,<br>Sure Venkatesh</b></p>
+    </body>
+    </html>
+    """
+    
+    try:
+        outlook = win32com.client.Dispatch('outlook.application')
+        mail = outlook.CreateItem(0)
+        mail.To = EMAIL_TO
+        mail.CC = EMAIL_CC
+        mail.Subject = EMAIL_SUBJECT
+        mail.HTMLBody = body
+        mail.Send()
+        logger.info("✅ Email sent successfully via Outlook!")
+    except Exception as e:
+        logger.error(f"Email sending failed: {e}")
+        # Fallback
+        import pandas as pd
+        pd.DataFrame(data).to_excel("Java_Report_Details.xlsx", index=False)
+
+
+# ====================== MAIN ======================
+
+if __name__ == "__main__":
+    if not SSH_USER or not SSH_PASS:
+        logger.error("SSH_USER or SSH_PASS is not configured!")
+        sys.exit(1)
+    
+    print("🚀 Starting Java Version Audit...\n")
+    
+    audit_data = run_audit()
+    
+    print("\n" + "="*80)
+    print("AUDIT COMPLETE")
+    print("="*80)
+    print(audit_df.to_string(index=False))
+    for row in audit_data:
+        print(f"{row['Server']:25} → {row['Java Version']}")
+    
+    # Send email
+    send_outlook_email(audit_data)
+    
+    # Save report locally
+    audit_df.to_excel("Java_Version_Report.xlsx", index=False)
+    print(f"\n📊 Report saved as 'Java_Version_Report.xlsx'")
+    print("\n📧 Report has been sent via Outlook.")    
 
