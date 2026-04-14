@@ -1,1 +1,362 @@
+import paramiko
+import logging
+import time
+import win32com.client as win32
+import pandas as pd
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from typing import List, Dict, Tuple
 
+# ====================== CONFIGURATION ======================
+
+@dataclass
+class AppServers:
+    name: str
+    servers: List[str]
+
+# === SERVER INVENTORY ===
+INVENTORY: List[AppServers] = [
+    AppServers("DEVPEGA", [
+        "DC04DLVPEG318","DC04DLVPEG319","DC04DLVPEG323","DC04DLVPEG324","DC04DLVPEG326",
+        "DC04DLVPEG327","DC04DLVPEG329","DC04DLVPEG330","DC04DLVPEG332","DC04DLVPEG333",
+        "DC04DLVPEG335","DC04DLVPEG336","DC04DLVPEG338","DC04DLVPEG339"
+    ]),
+    AppServers("SBXPEGA", [
+        "DC04DLVPEG317","DC04DLVPEG322","DC04DLVPEG325","DC04DLVPEG328",
+        "DC04DLVPEG331","DC04DLVPEG334","DC04DLVPEG337"
+    ]),
+    AppServers("SITPEGA", [
+        "DC04TLVPEG413","DC04TLVPEG414","DC04TLVPEG433","DC04TLVPEG434","DC04TLVPEG452",
+        "DC04TLVPEG453","DC04TLVPEG456","DC04TLVPEG457","DC04TLVPEG460","DC04TLVPEG461",
+        "DC04TLVPEG464","DC04TLVPEG465","DC04TLVPEG468","DC04TLVPEG469"
+    ]),
+    AppServers("UATPEGA", [
+        "DC04TLVPEG415","DC04TLVPEG416","DC04TLVPEG435","DC04TLVPEG436","DC04TLVPEG454",
+        "DC04TLVPEG455","DC04TLVPEG458","DC04TLVPEG459","DC04TLVPEG462","DC04TLVPEG463",
+        "DC04TLVPEG466","DC04TLVPEG467","DC04TLVPEG470","DC04TLVPEG471"
+    ]),
+    AppServers("PERF1PEGA", [
+        "VA10TLVPEG366","VA10TLVPEG367","VA10TLVPEG368","DC04TLVPEG417","DC04TLVPEG418",
+        "DC04TLVPEG419","DC04TLVPEG420","DC04TLVPEG421","DC04TLVPEG422","DC04TLVPEG423",
+        "DC04TLVPEG424","DC04TLVPEG425","DC04TLVPEG426","DC04TLVPEG427","DC04TLVPEG428",
+        "DC04TLVPEG429","DC04TLVPEG430","DC04TLVPEG431"
+    ]),
+    AppServers("PERF2PEGA", [
+        "VA10TLVPEG363","VA10TLVPEG364","VA10TLVPEG365","DC04TLVPEG437","DC04TLVPEG438",
+        "DC04TLVPEG439","DC04TLVPEG440","DC04TLVPEG441","DC04TLVPEG442","DC04TLVPEG443",
+        "DC04TLVPEG444","DC04TLVPEG445","DC04TLVPEG446","DC04TLVPEG447","DC04TLVPEG448",
+        "DC04TLVPEG449","DC04TLVPEG450","DC04TLVPEG451"
+    ]),
+    AppServers("Roster<br>Automation", [
+        "DC04DLVSPS300","DC04TLVSPS302","DC04TLVSPS306","DC04TLVSPS304","DC04TLVSPS307",
+        "VA33TLVPEG414","VAAZTLVSPS300","DC04TLVSPS305","DC04TLVSPS308","DC04TLVSPS300",
+        "DC04TLVSPS301","VA10TLVPEG331","VAAZTLVSPS301","VAAZTLVSPS302"
+    ]),
+    AppServers("SPSMDM<br>Python", [
+        "VA10DLVSPS300","VA10DLVSPS301","VA10TLVSPS300","VA10TLVSPS301","VA10TLVSPS302",
+        "VA10TLVSPS303","VA33DLVSPS300","VA33DLVSPS301","VA33DLVSPS302","VA33DLVSPS303",
+        "VA33TLVSPS300","VA33TLVSPS301","VA33TLVSPS302","VA33TLVSPS303","VA33TLVSPS304"
+    ]),
+    AppServers("SPSCore Services", [
+        "VA33DLVWBS388","VA33DLVWBS389","VA33DLVWBS390","VA33DLVWBS391","VA33DLVWBS382",
+        "VA33DLVWBS383","VA33DLVWBS384","VA33DLVWBS387","VA33DLVWBS400","VA33DLVWBS401",
+        "VA33DLVWBS381","VA33DLVWBS385","VA33DLVWBS386","VA33DLVWBS398","VA33DLVWBS399",
+        "VA33DLVWBS392","VA33DLVWBS396","VA33DLVWBS397","VA33DLVWBS404","VA33DLVWBS405",
+        "VA33DLVWBS406","VA33DLVWBS407","VA33DLVWBS313","VA33DLVWBS314","VA33DLVWBS370",
+        "VA33DLVWBS371","DC04DLVWBS338","DC04DLVWBS339","VA10DLVWBS358","VA10DLVWBS359",
+        "DC04TLVWBS398","DC04TLVWBS399","VA33TLVWBS543","VA33TLVWBS568","VA33TLVWBS356",
+        "VA33TLVWBS357","VA33TLVWBS539","VA33TLVWBS540","VA10TLVWBS710","VA10TLVWBS711",
+        "VA10TLVWBS712","VA10TLVWBS713","VA10TLVWBS714","VA10TLVWBS715","VA10TLVWBS716",
+        "VA10TLVWBS717","VA10TLVWBS718","VA10TLVWBS719","VA10TLVWBS720","VA10TLVWBS721",
+        "VA33TLVWBS544","VA33TLVWBS545","DC04TLVWBS396","DC04TLVWBS397","VA33TLVWBS569",
+        "VA33TLVWBS570","VA33TLVWBS524","VA33TLVWBS574","VA33TLVWBS575","VA33TLVWBS358",
+        "VA33TLVWBS541","VA33TLVWBS542","VA33TLVWBS538","VA10TLVWBS739","VA33TLVWBS576",
+        "DC04TLVWBS370"
+    ]),
+    AppServers("UIX", [
+        "DC04DLVWBS342","DC04DLVWBS309","DC04TLVWBS426","DC04TLVWBS325","DC04TLVWBS326",
+        "DC04TLVWBS427","DC04TLVWBS428","DC04TLVWBS339","DC04TLVWBS340"
+    ]),
+    AppServers("DARTUI", [
+        "DC04DLVWBS318","DC04TLVWBS342","DC04TLVWBS345","DC04TLVWBS346","DC04TLVWBS347",
+        "DC04TLVWBS341"
+    ]),
+    AppServers("PKM", [
+        "DC04DLVWBS331","DC04DLVWBS330","DC04TLVWBS367","DC04TLVWBS365","DC04TLVWBS369",
+        "DC04TLVWBS368","DC04TLVWBS386","DC04TLVWBS387","DC04TLVWBS388","DC04TLVWBS389"
+    ]),
+    AppServers("MDM/MATCH", [
+        "VA33DLVWBS402","VA33DLVWBS412","VA33DLVWBS413","VA33TLVWBS571","VA33TLVWBS577",
+        "VA33TLVWBS578","VA10TLVWBS630","VA33TLVWBS572","VA33TLVWBS579","VA10TLVWBS628",
+        "VA10TLVWBS629","VA10TLVWBS631","VA10DLVWBS354"
+    ]),
+    AppServers("CyberARK POC", [
+        "VA10TLVPEG357","VA10TLVPEG358"
+    ]),
+    AppServers("SPSNMS TOOL", ["VA10TLVPEG332"]),
+    AppServers("Repurposed PEGA", [
+        "VA10DLVPEG303","VA33DLVPEG365","VA33DLVPEG366"
+    ]),
+    AppServers("KAFKA", [
+        "VA10TLVKAF300","VA10TLVKAF301","VA33DLVKAF307","VA33TLVKAF323","VA33TLVKAF324"
+    ]),
+    AppServers("Prov360/<br>ProvRestore<br>/SPSAudit", ["VA33DLVWBS376","VA33TLVWBS555","VA33TLVWBS558"]),
+    AppServers("MasterData<br>EngineCalloutApp", ["VA10N10156","VA10N10157"]),
+    AppServers("EnterpriseProvider<br>DatabaseSolution<br>LegacyApp", ["VAATHMR205","VAATHMR207","VAATHMR209"]),
+    AppServers("NPIBatchEngine", ["VAATHMR191","VAATHMR192","VAATHMR246","VAATHMR247"]),
+    AppServers("PARES Inactive", ["VA33TLVWBS559","VA33TLVWBS560","VA33TLVIHS569","VA33TLVIHS570","VA33TLVIHS571","VA33TLVIHS572"]),
+    AppServers("PEGA Inactive", [
+        "VA33TLVATC312","VA33TLVATC313","VA33TLVATC314","VA33TLVATC315","VA33TLVATC316","VA33TLVATC317",
+        "VA33TLVIHS588","VA33TLVIHS589","VA33TLVIHS590"
+    ]),
+    AppServers("CAREMORE<br>Inactive", [
+        "VAAZTLVWBS311.CAREMORE.COM","VAAZTLVWBS312.CAREMORE.COM","VAAZTLVWBS313.CAREMORE.COM","VAAZTLVWBS314.CAREMORE.COM",
+        "VAAZTLVWBS315.CAREMORE.COM"
+    ]),
+    AppServers("Sanctioned<br>ProviderSystem<br>Inactive", [
+        "DC04DLVSPS301","DC04TLVSPS309","DC04TLVSPS310","DC04TLVSPS311","DC04TLVSPS312"
+    ]),
+    AppServers("SPSCoreService<br>Inactive", ["VA10TLVWBS740"]),
+    AppServers("Blue Provider<br>Database", ["VA33DLVORC325","VA10TLVORC307"]),
+    AppServers("SPS DD SOA<br>Consumption layer", ["DC04DLVMDB312"]),
+]
+
+SSH_USER = "an453200ad"
+SSH_PASS = "-6Xa%YvHEGVA!$uXtB7R"
+TIMEOUT = 15
+MAX_WORKERS = 10
+
+APPLICATION_JAVA_PATHS = [
+    "/apps/oracle/product/19.3/19c_Full/jdk/bin/java",
+    "/apps/oracle/product/19.3/19c_Full/jdk/jre/bin/java",
+    "/apps/oracle/product/19.3/19c_Full/client/stage/Components/oracle.jdk/1.8.0.201.0/1/DataFiles/Expanded/filegroup2/jre/bin/java"
+]
+
+SPECIAL_APPS = ["Roster<br>Automation", "SPSMDM<br>Python"]
+
+# Email Configuration
+#EMAIL_TO = "Sure, Venkatesh <Venkatesh.Sure@carelon.com>"
+#EMAIL_CC = "Sure, Venkatesh <Venkatesh.Sure@carelon.com>"
+EMAIL_TO = "dl-T-SPS-Infrastructure-offshore <dl-T-SPS-Infrastructure-offshore@legato.com>"
+EMAIL_CC = "Ande, Sreedevi <sreedevi.ande@elevancehealth.com>; Singh, Sushant <Sushant.Singh@carelon.com>"
+EMAIL_SUBJECT = "[SPS] Non-PROD Environment Servers System Java, JRE Version, VENDOR and Application Paths Java, JRE, VENDOR Details Report"
+EXCEL_REPORT_NAME = "Java_Version_Report.xlsx"
+
+# ====================== LOGGING ======================
+logging.basicConfig(level=logging.INFO, format='%(message)s')
+logger = logging.getLogger(__name__)
+logging.getLogger("paramiko.transport").setLevel(logging.WARNING)
+
+# ====================== JAVA PARSING ======================
+
+def parse_java_output(output: str) -> Tuple[str, str, str]:
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    
+    version = "Not Available"
+    runtime_env = "Not Available"
+    vendor = "Not Available"
+    
+    if lines:
+        first_line = lines[0].replace('"', '').strip()
+        if "version" in first_line.lower():
+            version = first_line.split("version")[-1].strip()
+        else:
+            version = first_line
+    
+    for line in lines:
+        if "Runtime Environment" in line:
+            runtime_env = line
+        elif any(x in line for x in ["Server VM", "64-Bit", "OpenJDK", "Zulu", "Temurin"]):
+            vendor = line
+    
+    return version, runtime_env, vendor
+
+
+def get_java_details(ssh: paramiko.SSHClient, command: str) -> Dict:
+    try:
+        _, stdout, stderr = ssh.exec_command(f"{command} -version", timeout=10)
+        output = (stderr.read().decode('utf-8') + stdout.read().decode('utf-8')).strip()
+        
+        if not output or "command not found" in output.lower() or "bash: java:" in output.lower():
+            return {"Java Version": "Not Installed", "OpenJDK Runtime Environment": "Not Installed", "Vendor Details": "Not Installed"}
+        
+        ver, runtime, vendor = parse_java_output(output)
+        return {
+            "Java Version": ver,
+            "OpenJDK Runtime Environment": runtime,
+            "Vendor Details": vendor
+        }
+    except Exception:
+        return {"Java Version": "Error", "OpenJDK Runtime Environment": "Error", "Vendor Details": "Error"}
+
+
+def get_application_java(ssh: paramiko.SSHClient, app_name: str) -> str:
+    if app_name not in SPECIAL_APPS:
+        return "NA"
+    
+    result_lines = []
+    for path in APPLICATION_JAVA_PATHS:
+        details = get_java_details(ssh, path)
+        result_lines.append(
+            f"Version : {details['Java Version']}\n"
+            f"Runtime : {details['OpenJDK Runtime Environment']}\n"
+            f"Vendor : {details['Vendor Details']}\n"
+            f"Path : {path}\n"
+        )
+    return "\n\n".join(result_lines)
+
+
+def check_server(server: str, app_name: str, index: int) -> Dict:
+    row = {
+        "Index": index,
+        "Application": app_name,
+        "Server": server,
+        "System Java Version": "Pending",
+        "System OpenJDK Runtime": "Pending",
+        "System Vendor OpenJDK Details": "Pending",
+        "Application Java Details": "Pending"
+    }
+    
+    try:
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(hostname=server, username=SSH_USER, password=SSH_PASS,
+                    timeout=TIMEOUT, allow_agent=False, look_for_keys=False)
+        
+        shell = ssh.invoke_shell()
+        time.sleep(2)
+        if shell.recv_ready():
+            shell.recv(10000)
+
+        sys_details = get_java_details(ssh, "java")
+        row["System Java Version"] = sys_details["Java Version"]
+        row["System OpenJDK Runtime"] = sys_details["OpenJDK Runtime Environment"]
+        row["System Vendor OpenJDK Details"] = sys_details["Vendor Details"]
+        
+        row["Application Java Details"] = get_application_java(ssh, app_name)
+        
+        ssh.close()
+        logger.info(f"✅ {server} audited.")
+       
+    except Exception as e:
+        err = "Connection Failed"
+        row["System Java Version"] = err
+        row["System OpenJDK Runtime"] = err
+        row["System Vendor OpenJDK Details"] = err
+        row["Application Java Details"] = err
+        logger.error(f"❌ {server} failed: {str(e)[:60]}")
+   
+    return row
+
+
+def create_html_report(data: List[Dict]) -> str:
+    html = """
+    <table border="1" style="border-collapse: collapse; width:100%; font-family: Calibri, sans-serif; font-size: 11pt;">
+        <thead>
+            <tr style="background-color: #2E7D32; text-align: center; color: white;">
+                <th style="padding:10px;">Application Name</th>
+                <th style="padding:10px;">Server</th>
+                <th style="padding:10px;">System Java Version</th>
+                <th style="padding:10px;">System OpenJDK Runtime</th>
+                <th style="padding:10px;">System Vendor OpenJDK Details</th>
+                <th style="padding:10px;">Application Java Version for Particular Paths</th>
+            </tr>
+        </thead>
+        <tbody>
+    """
+   
+    df = pd.DataFrame(data)
+    app_counts = df['Application'].value_counts(sort=False)
+    current_app = ""
+    
+    for _, row in df.iterrows():
+        is_special = row['Application'] in SPECIAL_APPS
+        align_style = "left" if is_special else "center"
+        app_java = str(row["Application Java Details"])
+        
+        bg_color = "#f8d7da" if "Failed" in app_java or "Error" in app_java else \
+                   "#d4edda" if any(x in app_java for x in ["17.", "11.", "1.8"]) else "#ffffff"
+
+        html += "<tr>"
+        if row['Application'] != current_app:
+            count = app_counts[row['Application']]
+            html += f'<td rowspan="{count}" style="background-color: #E8F5E9; font-weight: bold; text-align: center; vertical-align: middle;">{row["Application"]}</td>'
+            current_app = row['Application']
+       
+        html += f'<td style="padding:6px; text-align: center;">{row["Server"]}</td>'
+        html += f'<td style="padding:6px; text-align: center;">{row["System Java Version"]}</td>'
+        html += f'<td style="padding:6px; text-align: center; white-space: pre-wrap;">{row["System OpenJDK Runtime"]}</td>'
+        html += f'<td style="padding:6px; text-align: center; white-space: pre-wrap;">{row["System Vendor OpenJDK Details"]}</td>'
+       
+        cell_content = app_java.replace('\n', '<br>')
+        html += f'<td style="padding:6px; background-color: {bg_color}; text-align: {align_style}; white-space: pre-wrap;">{cell_content}</td>'
+        html += "</tr>"
+   
+    html += "</tbody></table>"
+    return html
+
+
+def draft_email(data: List[Dict]):
+    try:
+        excel_file = os.path.abspath(EXCEL_REPORT_NAME)
+        
+        outlook = win32.Dispatch('outlook.application')
+        mail = outlook.CreateItem(0)
+        mail.To = EMAIL_TO
+        mail.CC = EMAIL_CC
+        mail.Subject = EMAIL_SUBJECT
+        mail.HTMLBody = f"""
+        <html><body>
+            <p>Hi Team,</p>
+            <p>Please find the detailed Java version verification report below:</p>
+            {create_html_report(data)}
+            <p><b>Note:</b> Detailed Application Java path checking is performed only for <b>Roster Automation</b> and <b>SPSMDM Python</b> servers.</p>
+            <p>Excel report is attached for your reference.</p>
+
+            <p><i>This is an automated report.</i></p>
+            <p>Regards,<br><b>Sure Venkatesh</b></p>
+        </body></html>"""
+        
+        # Attach Excel file
+        if os.path.exists(excel_file):
+            mail.Attachments.Add(excel_file)
+            logger.info(f"📎 Excel report attached: {EXCEL_REPORT_NAME}")
+        else:
+            logger.warning("⚠️ Excel file not found for attachment!")
+        
+        mail.Display()
+        logger.info("📧 Email Drafted successfully with attachment.")
+        
+    except Exception as e:
+        logger.error(f"Failed to send email: {e}")
+
+
+# ====================== MAIN ======================
+if __name__ == "__main__":
+    print("🚀 Starting Java Audit with Detailed OpenJDK & Vendor Information...\n")
+    
+    tasks = []
+    idx = 0
+    for app in INVENTORY:
+        for server in app.servers:
+            tasks.append((server, app.name, idx))
+            idx += 1
+
+    results = []
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {executor.submit(check_server, t[0], t[1], t[2]): t for t in tasks}
+        for future in as_completed(futures):
+            results.append(future.result())
+   
+    results.sort(key=lambda x: x['Index'])
+   
+    # Save Excel Report
+    final_df = pd.DataFrame(results).drop(columns=['Index'])
+    final_df.to_excel(EXCEL_REPORT_NAME, index=False)
+    print(f"💾 Excel report saved: {EXCEL_REPORT_NAME}")
+    
+    # Send Email with Attachment
+    draft_email(results)
+   
+    print("\n✅ Audit Complete!")
