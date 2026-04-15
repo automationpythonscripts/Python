@@ -1,1 +1,289 @@
+import paramiko
+import logging
+import pandas as pd
+import os
+import re
+import win32com.client as win32
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from typing import List, Dict
 
+# ====================== CONFIGURATION ======================
+
+@dataclass
+class AppServers:
+    name: str
+    servers: List[str]
+
+# === SERVER INVENTORY ===
+INVENTORY: List[AppServers] = [
+    AppServers("PEGA", ["VA10PLVPEG516","VA10PLVPEG517","VA10PLVPEG518","DC04PLVPEG391","DC04PLVPEG392","DC04PLVPEG393","DC04PLVPEG394","DC04PLVPEG395","DC04PLVPEG396","DC04PLVPEG397","DC04PLVPEG398","DC04PLVPEG399","DC04PLVPEG400","DC04PLVPEG401","DC04PLVPEG402","DC04PLVPEG403","DC04PLVPEG404","DC04PLVPEG405"]),
+    AppServers("SPS/PARES/UIX Core Services", ["VA10PLVWBS628","VA10PLVWBS629","VA10PLVWBS630","VA10PLVWBS744","VA10PLVWBS745","VA10PLVWBS746","VA10PLVWBS747","VA10PLVWBS748","VA10PLVWBS749","VA10PLVWBS750","VA10PLVWBS751","VA10PLVWBS752"]),
+    AppServers("UIX", ["DC04PLVWBS321", "DC04PLVWBS322"]),
+    AppServers("DARTUI", ["DC04PLVWBS323","DC04PLVWBS324"]),
+    AppServers("PKM", ["DC04PLVWBS371","DC04PLVWBS372","DC04PLVWBS373","DC04PLVWBS374"]),
+    AppServers("Roster Automation", ["DC04PLVSPS300","DC04PLVSPS301","VA10PLVPEG360","VAAZPLVSPS300","VAAZPLVSPS301"]),
+    AppServers("SPSMDM Python", ["VA10PLVSPS300","VA10PLVSPS301"]),
+    AppServers("MDM/Match", ["VA10PLVWBS687","VA10PLVWBS688"]),
+    AppServers("Provider360 PDS", ["VA10PLVWBS669"]),
+    AppServers("PARESInactive/Prov360/ProvRestore/SPSAudit", ["VA10PLVWBS669","VA10PLVWBS670"]),
+    AppServers("PDT", ["DC04PLVCFE305"]),
+    AppServers("BPD", ["DC04PLVCFE306"]),
+    AppServers("KAFKA", ["VA10PLVKAF312","VA10PLVKAF313"]),
+    AppServers("PARES Inactive", ["VA10PLVWBS670","VA10PLVIHS554","VA10PLVIHS555"]),
+    AppServers("CoreServices Inactive", ["VA10PLVWBS761","VA10PLVWBS762"]),
+    AppServers("PEGA Inactive", ["VA10PLVPEG361","VA10PLVPEG362","VA10PLVPEG363","VA10PLVPEG447","VA10PLVPEG448","VA10PLVPEG449","VA10PLVPEG460","VA10PLVPEG461","VA10PLVPEG462","VA10PLVPEG463","VA10PLVPEG493","VA10PLVPEG494","VA10PLVPEG495","VA10PLVPEG496","VA10PLVPEG497","VA10PLVPEG498","VA10PLVPEG552","VA10PLVPEG553"]),
+    AppServers("Sanctioned Provider System Inactive", ["DC04PLVSPS302","DC04PLVSPS303"]),
+    AppServers("ePACT", ["VA10PLVSAW308"]),
+]
+
+SSH_USER = "an453200ad"
+SSH_PASS = "-Yje!C82Z%ngR-nzX3!e"
+TIMEOUT = 15
+MAX_WORKERS = 10
+
+# Email Configuration
+EMAIL_TO = "dl-T-SPS-Infrastructure-offshore <dl-T-SPS-Infrastructure-offshore@legato.com>"
+EMAIL_CC = "Ande, Sreedevi <sreedevi.ande@elevancehealth.com>; Singh, Sushant <Sushant.Singh@carelon.com>"
+EMAIL_SUBJECT = "[SPS] PROD Environment - Running Application Process Java Versions Report"
+EXCEL_REPORT_NAME = "Java_Version_Report.xlsx"
+
+# ====================== LOGGING ======================
+logging.basicConfig(level=logging.INFO, format='%(message)s')
+logger = logging.getLogger(__name__)
+logging.getLogger("paramiko.transport").setLevel(logging.WARNING)
+
+# ====================== HELPER FUNCTIONS ======================
+
+def parse_java_output(output: str) -> Dict:
+    v_match = re.search(r'version "([^"]+)"', output)
+    version = v_match.group(1) if v_match else "N/A"
+    r_match = re.search(r'runtime environment ([^\n]+)', output, re.IGNORECASE)
+    runtime = r_match.group(1).strip() if r_match else "N/A"
+    vm_match = re.search(r'(?:vm|server) ([^\n]+)', output, re.IGNORECASE)
+    vendor = vm_match.group(1).strip() if vm_match else "N/A"
+    return {"Java Version": version, "Runtime": runtime, "Vendor": vendor}
+
+def get_java_details(ssh: paramiko.SSHClient, java_path: str) -> Dict:
+    try:
+        cmd = f"{java_path} -version"
+        _, stdout, stderr = ssh.exec_command(cmd, timeout=10)
+        output = (stderr.read().decode('utf-8') + stdout.read().decode('utf-8')).strip()
+        if "permission denied" in output.lower() or "command not found" in output.lower():
+            return {"Java Version": "Permission Denied", "Runtime": "Permission Denied", "Vendor": "Permission Denied"}
+        return parse_java_output(output)
+    except Exception:
+        return {"Java Version": "Error", "Runtime": "Error", "Vendor": "Error"}
+
+def get_running_java_processes(ssh: paramiko.SSHClient) -> List[Dict]:
+    try:
+        ps_cmd = "ps -ef | grep '[b]in/java' | grep -v grep"
+        _, stdout, _ = ssh.exec_command(ps_cmd)
+        ps_output = stdout.read().decode('utf-8').strip()
+        if not ps_output:
+            return []
+
+        processes = []
+        for line in ps_output.split('\n'):
+            line = line.strip()
+            if not line: continue
+            parts = line.split()
+            if len(parts) < 8: continue
+
+            java_path = parts[7]
+            classification = "Unknown"
+
+            # Logic for classifying the process
+            l_line = line.lower()
+            if "instana" in l_line: classification = "Instana Agent"
+            elif "ucd" in l_line: classification = "UCD Agent"
+            elif "/apps/tomcat9/kafka" in l_line: classification = "Application Kafka Process"
+            elif "/apps/appd/machineagent" in l_line: classification = "MachineAgent Process"
+            elif "/apps/bamboo_home" in l_line: classification = "Bamboo Agent Process"
+            elif any(x in l_line for x in ["srctmagc", "srctmag5", "srcctmag"]): classification = "Control M Job Process"
+            elif "pdt" in l_line or "bdd" in l_line:
+                name = line.split()[-1]
+                classification = name.replace("--spring.config.location=file:/cloverleaf/", "").replace("/application.properties", "")
+            elif "prod_sps_mdm" in l_line:
+                info = " ".join(line.split()[-4:])
+                classification = info.replace("/usr/WebSphere/AppServer/profiles/", "").replace("/config", "")
+            elif "-Didentification.nodeid=" in line:
+                match = re.search(r'-Didentification\.nodeid=(\S+)', line)
+                classification = match.group(1) if match else "Node Process"
+            elif "fbda" in l_line: classification = "FBDA"
+            elif "pds" in l_line:
+                classification = line.split()[-1].split('/')[-1]
+            elif "/wsapps/cores/" in line:
+                match = re.search(r'/wsapps/cores/([^/\s]+)', line)
+                classification = match.group(1) if match else "Core Service"
+
+            if classification == "Unknown":
+                continue
+
+            details = get_java_details(ssh, java_path)
+            processes.append({
+                "Process Type": classification,
+                "Path": java_path,
+                "Java Version": details["Java Version"],
+                "Runtime": details["Runtime"],
+                "Vendor": details["Vendor"]
+            })
+        return processes
+    except Exception as e:
+        logger.error(f"Error fetching processes: {e}")
+        return []
+
+def check_server(server: str, app_name: str) -> List[Dict]:
+    rows = []
+    ssh = None
+    try:
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(hostname=server, username=SSH_USER, password=SSH_PASS, timeout=TIMEOUT, allow_agent=False, look_for_keys=False)
+        
+        processes = get_running_java_processes(ssh)
+        
+        if not processes:
+            rows.append({"Application": app_name, "Server": server, "Process Type": "No Java Processes Found", "Path": "N/A", "Java Version": "N/A", "Runtime": "N/A", "Vendor": "N/A"})
+        else:
+            for proc in processes:
+                rows.append({"Application": app_name, "Server": server, **proc})
+        
+        logger.info(f"✅ {server} audited.")
+    except Exception as e:
+        rows.append({"Application": app_name, "Server": server, "Process Type": "Connection Failed", "Path": "N/A", "Java Version": str(e)[:50], "Runtime": "N/A", "Vendor": "N/A"})
+        logger.error(f"❌ {server} failed: {str(e)[:80]}")
+    finally:
+        if ssh: ssh.close()
+    return rows
+
+def highlight_version(val):
+    if isinstance(val, str):
+        # Highlighting logic for only RedHat vulnerable/outdated versions
+        if any(x in val for x in ["Red_Hat-11.0.25"]):
+            return f'<span style="background-color: #FF6B6B; color: white; font-weight: bold; padding: 2px 4px; border-radius: 3px;">{val}</span>'
+    return val
+
+def create_html_report(data: List[Dict]) -> str:
+    if not data:
+        return "<p>No data found during audit.</p>"
+
+    df = pd.DataFrame(data)
+    df = df.sort_values(by=['Application', 'Server']).reset_index(drop=True)
+    
+    html = """
+    <table border="1" style="border-collapse: collapse; width:100%; font-family: Calibri, sans-serif; font-size: 10pt; table-layout: fixed;">
+        <thead>
+            <tr style="background-color: #2E7D32; color: white; text-align: center;">
+                <th style="padding:8px; width:4%;">Application</th>
+                <th style="padding:8px; width:9%;">Server</th>
+                <th style="padding:8px; width:15%;">Process Type</th>
+                <th style="padding:8px; width:25%;">Path</th>
+                <th style="padding:8px; width:9%;">Java Version</th>
+                <th style="padding:8px; width:15%;">Runtime</th>
+                <th style="padding:8px; width:18%;">Vendor</th>
+            </tr>
+        </thead>
+        <tbody>
+    """
+
+    app_counts = df['Application'].value_counts(sort=False).to_dict()
+    server_counts = df.groupby(['Application', 'Server']).size().to_dict()
+
+    processed_apps = set()
+    processed_servers = set()
+
+    for index, row in df.iterrows():
+        # 1. Determine if this row should be highlighted
+        # We check both Runtime and Vendor columns for the specific version
+        is_vulnerable = "Red_Hat-11.0.25" in str(row['Runtime']) or "Red_Hat-11.0.25" in str(row['Vendor'])
+        row_style = ' style="background-color: #FFEBEE;"' if is_vulnerable else ""
+
+        html += f"<tr{row_style}>"
+
+        # Application Cell
+        app_name = row['Application']
+        if app_name not in processed_apps:
+            span = app_counts[app_name]
+            # Note: Grouped cells keep their original light green background for clarity
+            html += f'<td rowspan="{span}" style="background-color: #F1F8E9; font-weight: bold; text-align: center; vertical-align: middle; border: 1px solid #ccc; padding:5px;">{app_name}</td>'
+            processed_apps.add(app_name)
+
+        # Server Cell
+        server_key = (app_name, row['Server'])
+        if server_key not in processed_servers:
+            span = server_counts[server_key]
+            html += f'<td rowspan="{span}" style="text-align: center; vertical-align: middle; font-weight: bold; border: 1px solid #ccc; padding:5px;">{row["Server"]}</td>'
+            processed_servers.add(server_key)
+
+        # Details
+        html += f'<td style="padding:5px; border: 1px solid #ccc;">{row["Process Type"]}</td>'
+        html += f'<td style="padding:5px; border: 1px solid #ccc; font-family: Consolas, monospace; font-size: 9pt; word-wrap: break-word;">{row["Path"]}</td>'
+        html += f'<td style="padding:5px; border: 1px solid #ccc; text-align: center;">{row["Java Version"]}</td>'
+        
+        # Keep your existing highlight_version for the specific text badge
+        html += f'<td style="padding:5px; border: 1px solid #ccc; text-align: center;">{highlight_version(row["Runtime"])}</td>'
+        html += f'<td style="padding:5px; border: 1px solid #ccc; text-align: center;">{highlight_version(row["Vendor"])}</td>'
+
+        html += "</tr>"
+
+    html += "</tbody></table>"
+    return html
+
+
+def draft_email(data: List[Dict]):
+    try:
+        excel_path = os.path.abspath(EXCEL_REPORT_NAME)
+        outlook = win32.Dispatch('outlook.application')
+        mail = outlook.CreateItem(0)
+        mail.To = EMAIL_TO
+        mail.CC = EMAIL_CC
+        mail.Subject = EMAIL_SUBJECT
+        
+        table_html = create_html_report(data)
+        
+        mail.HTMLBody = f"""
+        <html><body>
+            <p>Hi Team,</p>
+            <p>Please find the consolidated report of <b>Running Application Process Java Versions</b> across PROD servers:</p>
+            {table_html}
+            <br>
+            <p><b>Note:</b> <span style="background-color: #FF6B6B; color: white; padding: 2px 4px;">Red Highlight</span> = Red_Hat-11.0.25.</p>
+            <p>The full technical breakdown is attached as an Excel file.</p>
+            <p>Regards,<br><b>Sure Venkatesh</b></p>
+        </body></html>"""
+        
+        if os.path.exists(excel_path):
+            mail.Attachments.Add(excel_path)
+        
+        mail.Display()
+        logger.info("📧 Outlook email draft created.")
+    except Exception as e:
+        logger.error(f"Failed to draft email: {e}")
+
+# ====================== MAIN ======================
+if __name__ == "__main__":
+    print("🚀 Starting Java Process Audit...")
+    
+    all_results = []
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = [executor.submit(check_server, server, app.name) 
+                   for app in INVENTORY for server in app.servers]
+        
+        for future in as_completed(futures):
+            all_results.extend(future.result())
+    
+    if all_results:
+        # Save Excel
+        df_final = pd.DataFrame(all_results)
+        df_final.to_excel(EXCEL_REPORT_NAME, index=False)
+        print(f"💾 Report saved: {EXCEL_REPORT_NAME}")
+        
+        # Draft Email
+        draft_email(all_results)
+    else:
+        print("⚠ No data collected. Email not drafted.")
+
+    print("\n✅ Task Finished.")
+
+-XshowSettings:properties -version 2>&1 | grep "java.vm.vendor" | awk -F'=' '{print $2}' | xargs
