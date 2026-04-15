@@ -4,12 +4,10 @@ import time
 import win32com.client as win32
 import pandas as pd
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import List, Dict, Tuple
-
-
-
+from typing import List, Dict
 
 # ====================== CONFIGURATION ======================
 
@@ -57,24 +55,14 @@ INVENTORY: List[AppServers] = [
 ]
 
 SSH_USER = "an453200ad"
-SSH_PASS = "Dxe%9erW6bBy#6SgZBqk"
+SSH_PASS = "-Yje!C82Z%ngR-nzX3!e"
 TIMEOUT = 15
 MAX_WORKERS = 10
 
-APPLICATION_JAVA_PATHS = [
-    "/apps/oracle/product/19.3/19c_Full/jdk/bin/java",
-    "/apps/oracle/product/19.3/19c_Full/jdk/jre/bin/java",
-    "/apps/oracle/product/19.3/19c_Full/client/stage/Components/oracle.jdk/1.8.0.201.0/1/DataFiles/Expanded/filegroup2/jre/bin/java"
-]
-
-SPECIAL_APPS = ["Roster<br>Automation", "SPSMDM<br>Python"]
-
 # Email Configuration
-#EMAIL_TO = "Sure, Venkatesh <Venkatesh.Sure@carelon.com>"
-#EMAIL_CC = "Sure, Venkatesh <Venkatesh.Sure@carelon.com>"
 EMAIL_TO = "dl-T-SPS-Infrastructure-offshore <dl-T-SPS-Infrastructure-offshore@legato.com>"
 EMAIL_CC = "Ande, Sreedevi <sreedevi.ande@elevancehealth.com>; Singh, Sushant <Sushant.Singh@carelon.com>"
-EMAIL_SUBJECT = "[SPS] PROD Environment Servers System Java, JRE Version, VENDOR and Application Paths Java, JRE, VENDOR Details Report"
+EMAIL_SUBJECT = "[SPS] PROD Environment - Running Application Java Versions Report"
 EXCEL_REPORT_NAME = "Java_Version_Report.xlsx"
 
 # ====================== LOGGING ======================
@@ -82,119 +70,157 @@ logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger(__name__)
 logging.getLogger("paramiko.transport").setLevel(logging.WARNING)
 
-# ====================== JAVA PARSING ======================
+# ====================== HELPER FUNCTIONS ======================
 
-def parse_java_output(output: str) -> Tuple[str, str, str]:
-    lines = [line.strip() for line in output.splitlines() if line.strip()]
+def parse_java_output(output: str) -> Dict:
+    output_lower = output.lower()
     
-    version = "Not Available"
-    runtime_env = "Not Available"
-    vendor = "Not Available"
+    v_match = re.search(r'version "([^"]+)"', output)
+    version = v_match.group(1) if v_match else "N/A"
     
-    if lines:
-        first_line = lines[0].replace('"', '').strip()
-        if "version" in first_line.lower():
-            version = first_line.split("version")[-1].strip()
-        else:
-            version = first_line
+    r_match = re.search(r'runtime environment ([^\n]+)', output, re.IGNORECASE)
+    runtime = r_match.group(1).strip() if r_match else "N/A"
     
-    for line in lines:
-        if "Runtime Environment" in line:
-            runtime_env = line
-        elif any(x in line for x in ["Server VM", "64-Bit", "OpenJDK", "Zulu", "Temurin"]):
-            vendor = line
+    vm_match = re.search(r'(?:vm|server) ([^\n]+)', output, re.IGNORECASE)
+    vendor = vm_match.group(1).strip() if vm_match else "N/A"
     
-    return version, runtime_env, vendor
+    return {
+        "Java Version": version,
+        "Runtime": runtime,
+        "Vendor": vendor
+    }
 
-
-def get_java_details(ssh: paramiko.SSHClient, command: str) -> Dict:
+def get_java_details(ssh: paramiko.SSHClient, java_path: str) -> Dict:
     try:
-        _, stdout, stderr = ssh.exec_command(f"{command} -version", timeout=10)
+        cmd = f"{java_path} -version"
+        _, stdout, stderr = ssh.exec_command(cmd, timeout=10)
         output = (stderr.read().decode('utf-8') + stdout.read().decode('utf-8')).strip()
         
-        if not output or "command not found" in output.lower() or "bash: java:" in output.lower():
-            return {"Java Version": "Not Installed", "OpenJDK Runtime Environment": "Not Installed", "Vendor Details": "Not Installed"}
+        if "permission denied" in output.lower() or "command not found" in output.lower():
+            return {"Java Version": "Permission Denied", "Runtime": "Permission Denied", "Vendor": "Permission Denied"}
         
-        ver, runtime, vendor = parse_java_output(output)
-        return {
-            "Java Version": ver,
-            "OpenJDK Runtime Environment": runtime,
-            "Vendor Details": vendor
-        }
+        return parse_java_output(output)
+        
     except Exception:
-        return {"Java Version": "Error", "OpenJDK Runtime Environment": "Error", "Vendor Details": "Error"}
+        return {"Java Version": "Error", "Runtime": "Error", "Vendor": "Error"}
 
+def get_running_java_processes(ssh: paramiko.SSHClient) -> str:
+    try:
+        ps_cmd = "ps -ef | grep '[b]in/java' | grep -v grep"
+        _, stdout, _ = ssh.exec_command(ps_cmd)
+        ps_output = stdout.read().decode('utf-8').strip()
 
-def get_application_java(ssh: paramiko.SSHClient, app_name: str) -> str:
-    if app_name not in SPECIAL_APPS:
-        return "NA"
-    
-    result_lines = []
-    for path in APPLICATION_JAVA_PATHS:
-        details = get_java_details(ssh, path)
-        result_lines.append(
-            f"Version : {details['Java Version']}\n"
-            f"Runtime : {details['OpenJDK Runtime Environment']}\n"
-            f"Vendor : {details['Vendor Details']}\n"
-            f"Path : {path}\n"
-        )
-    return "\n\n".join(result_lines)
+        if not ps_output:
+            return "No Java processes found"
 
+        results = []
+        for line in ps_output.split('\n'):
+            line = line.strip()
+            if not line:
+                continue
+                
+            parts = line.split()
+            if len(parts) < 8:
+                continue
+                
+            java_path = parts[7]
+            
+            # Process Classification
+            classification = "Unknown"
+            if "instana" in line.lower():
+                classification = "Instana Agent"
+            elif "ucd" in line.lower():
+                classification = "UCD Agent"
+            elif "/apps/tomcat9/kafka" in line.lower():
+                classification = "Application Kafka Process"
+            elif "/apps/appd/machineagent" in line.lower():
+                classification = "MachineAgent Process"
+            elif "/apps/bamboo_home" in line.lower():
+                classification = "Bamboo Agent Process"
+            elif "srctmagc" in line.lower():
+                classification = "Control M Job Process"
+            elif "srctmag5" in line.lower():
+                classification = "Control M Job Process"
+            elif "srcctmag" in line.lower():
+                classification = "srcctmag"
+            elif "pdt" in line.lower():
+                ws_parts = line.split()
+                if ws_parts:
+                    name = ws_parts[-1]
+                    classification = name.replace("--spring.config.location=file:/cloverleaf/", "").replace("/application.properties", "")
+            elif "bdd" in line.lower():
+                ws_parts = line.split()
+                if ws_parts:
+                    name = ws_parts[-1]
+                    classification = name.replace("--spring.config.location=file:/cloverleaf/", "").replace("/application.properties", "")
+            elif "prod_sps_mdm" in line.lower():
+                ws_parts = line.split()
+                if len(ws_parts) >= 4:
+                    info = " ".join(ws_parts[-4:])
+                    classification = info.replace("/usr/WebSphere/AppServer/profiles/", "").replace("/config", "")
+            elif "-Didentification.nodeid=" in line:
+                match = re.search(r'-Didentification\.nodeid=(\S+)', line)
+                classification = match.group(1) if match else "Node Process"
+            elif "fbda" in line.lower():
+                classification = "FBDA"
+            elif "pds" in line.lower():
+                ws_parts = line.split()
+                if ws_parts:
+                    classification = ws_parts[-1].split('/')[-1]
+            elif "/wsapps/cores/" in line:
+                match = re.search(r'/wsapps/cores/([^/\s]+)', line)
+                classification = match.group(1) if match else "Core Service"
+            
+            # Call details function
+            details = get_java_details(ssh, java_path)
+            
+            result_str = f"""Process Type : {classification}
+Path : {java_path}
+Java Version : {details['Java Version']}
+Runtime : {details['Runtime']}
+Vendor : {details['Vendor']}
+{'-'*90}"""
+            results.append(result_str)
+
+        return "\n\n".join(results) if results else "No Java processes found"
+
+    except Exception as e:
+        return f"Error fetching Java processes: {str(e)}"
 
 def check_server(server: str, app_name: str, index: int) -> Dict:
     row = {
         "Index": index,
         "Application": app_name,
         "Server": server,
-        "System Java Version": "Pending",
-        "System OpenJDK Runtime": "Pending",
-        "System Vendor OpenJDK Details": "Pending",
         "Application Java Details": "Pending"
     }
-    
+   
     try:
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         ssh.connect(hostname=server, username=SSH_USER, password=SSH_PASS,
                     timeout=TIMEOUT, allow_agent=False, look_for_keys=False)
-        
-        shell = ssh.invoke_shell()
-        time.sleep(2)
-        if shell.recv_ready():
-            shell.recv(10000)
-
-        sys_details = get_java_details(ssh, "java")
-        row["System Java Version"] = sys_details["Java Version"]
-        row["System OpenJDK Runtime"] = sys_details["OpenJDK Runtime Environment"]
-        row["System Vendor OpenJDK Details"] = sys_details["Vendor Details"]
-        
-        row["Application Java Details"] = get_application_java(ssh, app_name)
-        
+       
+        row["Application Java Details"] = get_running_java_processes(ssh)
+       
         ssh.close()
-        logger.info(f"✅ {server} audited.")
+        logger.info(f"✅ {server} audited successfully.")
        
     except Exception as e:
-        err = "Connection Failed"
-        row["System Java Version"] = err
-        row["System OpenJDK Runtime"] = err
-        row["System Vendor OpenJDK Details"] = err
-        row["Application Java Details"] = err
-        logger.error(f"❌ {server} failed: {str(e)[:60]}")
+        row["Application Java Details"] = "Connection Failed"
+        logger.error(f"❌ {server} failed: {str(e)[:80]}")
    
     return row
 
 
 def create_html_report(data: List[Dict]) -> str:
     html = """
-    <table border="1" style="border-collapse: collapse; width:100%; font-family: Calibri, sans-serif; font-size: 11pt;">
+    <table border="1" style="border-collapse: collapse; width:100%; font-family: Calibri, sans-serif; font-size: 10.5pt;">
         <thead>
             <tr style="background-color: #2E7D32; text-align: center; color: white;">
-                <th style="padding:10px;">Application Name</th>
+                <th style="padding:10px;">Application</th>
                 <th style="padding:10px;">Server</th>
-                <th style="padding:10px;">System Java Version</th>
-                <th style="padding:10px;">System OpenJDK Runtime</th>
-                <th style="padding:10px;">System Vendor OpenJDK Details</th>
-                <th style="padding:10px;">Application Java Version for Particular Paths</th>
+                <th style="padding:10px;">Running Application Java Processes</th>
             </tr>
         </thead>
         <tbody>
@@ -203,15 +229,10 @@ def create_html_report(data: List[Dict]) -> str:
     df = pd.DataFrame(data)
     app_counts = df['Application'].value_counts(sort=False)
     current_app = ""
-    
+   
     for _, row in df.iterrows():
-        is_special = row['Application'] in SPECIAL_APPS
-        align_style = "left" if is_special else "center"
-        app_java = str(row["Application Java Details"])
+        app_java = str(row["Application Java Details"]).replace('\n', '<br>')
         
-        bg_color = "#f8d7da" if "Failed" in app_java or "Error" in app_java else \
-                   "#d4edda" if any(x in app_java for x in ["17.", "11.", "1.8"]) else "#ffffff"
-
         html += "<tr>"
         if row['Application'] != current_app:
             count = app_counts[row['Application']]
@@ -219,12 +240,7 @@ def create_html_report(data: List[Dict]) -> str:
             current_app = row['Application']
        
         html += f'<td style="padding:6px; text-align: center;">{row["Server"]}</td>'
-        html += f'<td style="padding:6px; text-align: center;">{row["System Java Version"]}</td>'
-        html += f'<td style="padding:6px; text-align: center; white-space: pre-wrap;">{row["System OpenJDK Runtime"]}</td>'
-        html += f'<td style="padding:6px; text-align: center; white-space: pre-wrap;">{row["System Vendor OpenJDK Details"]}</td>'
-       
-        cell_content = app_java.replace('\n', '<br>')
-        html += f'<td style="padding:6px; background-color: {bg_color}; text-align: {align_style}; white-space: pre-wrap;">{cell_content}</td>'
+        html += f'<td style="padding:8px; text-align: left; white-space: pre-wrap; font-family: Consolas;">{app_java}</td>'
         html += "</tr>"
    
     html += "</tbody></table>"
@@ -234,7 +250,7 @@ def create_html_report(data: List[Dict]) -> str:
 def draft_email(data: List[Dict]):
     try:
         excel_file = os.path.abspath(EXCEL_REPORT_NAME)
-        
+       
         outlook = win32.Dispatch('outlook.application')
         mail = outlook.CreateItem(0)
         mail.To = EMAIL_TO
@@ -243,33 +259,28 @@ def draft_email(data: List[Dict]):
         mail.HTMLBody = f"""
         <html><body>
             <p>Hi Team,</p>
-            <p>Please find the detailed Java version verification report below:</p>
+            <p>Please find the detailed report of <b>Running Application Java Versions</b> across PROD servers:</p>
             {create_html_report(data)}
-            <p><b>Note:</b> Detailed Application Java path checking is performed only for <b>Roster Automation</b> and <b>SPSMDM Python</b> servers.</p>
+            <p><b>Note:</b> This report shows all running Java processes with their exact Java version, runtime, vendor and path.</p>
             <p>Excel report is attached for your reference.</p>
-
             <p><i>This is an automated report.</i></p>
             <p>Regards,<br><b>Sure Venkatesh</b></p>
         </body></html>"""
-        
-        # Attach Excel file
+       
         if os.path.exists(excel_file):
             mail.Attachments.Add(excel_file)
-            logger.info(f"📎 Excel report attached: {EXCEL_REPORT_NAME}")
-        else:
-            logger.warning("⚠️ Excel file not found for attachment!")
-        
+       
         mail.Display()
-        logger.info("📧 Email Drafted successfully with attachment.")
-        
+        logger.info("📧 Email drafted successfully.")
+       
     except Exception as e:
-        logger.error(f"Failed to send email: {e}")
+        logger.error(f"Failed to draft email: {e}")
 
 
 # ====================== MAIN ======================
 if __name__ == "__main__":
-    print("🚀 Starting Java Audit with Detailed OpenJDK & Vendor Information...\n")
-    
+    print("🚀 Starting Running Java Processes Audit...\n")
+   
     tasks = []
     idx = 0
     for app in INVENTORY:
@@ -289,8 +300,8 @@ if __name__ == "__main__":
     final_df = pd.DataFrame(results).drop(columns=['Index'])
     final_df.to_excel(EXCEL_REPORT_NAME, index=False)
     print(f"💾 Excel report saved: {EXCEL_REPORT_NAME}")
-    
-    # Send Email with Attachment
+   
+    # Draft Email
     draft_email(results)
    
-    print("\n✅ Audit Complete!")
+    print("\n✅ Audit Completed Successfully!")
