@@ -1,1 +1,296 @@
+import paramiko
+import logging
+import time
+import win32com.client as win32
+import pandas as pd
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from typing import List, Dict, Tuple
 
+
+
+
+# ====================== CONFIGURATION ======================
+
+@dataclass
+class AppServers:
+    name: str
+    servers: List[str]
+
+# === SERVER INVENTORY ===
+INVENTORY: List[AppServers] = [
+    AppServers("PEGA", [
+        "VA10PLVPEG516","VA10PLVPEG517","VA10PLVPEG518",
+        "DC04PLVPEG391","DC04PLVPEG392","DC04PLVPEG393","DC04PLVPEG394","DC04PLVPEG395",
+        "DC04PLVPEG396","DC04PLVPEG397","DC04PLVPEG398","DC04PLVPEG399","DC04PLVPEG400",
+        "DC04PLVPEG401","DC04PLVPEG402","DC04PLVPEG403","DC04PLVPEG404","DC04PLVPEG405"
+    ]),
+    AppServers("SPS/PARES/UIX<br>Core Services", [
+        "VA10PLVWBS628","VA10PLVWBS629","VA10PLVWBS630","VA10PLVWBS744","VA10PLVWBS745",
+        "VA10PLVWBS746","VA10PLVWBS747","VA10PLVWBS748","VA10PLVWBS749","VA10PLVWBS750",
+        "VA10PLVWBS751","VA10PLVWBS752"
+    ]),
+    AppServers("UIX", ["DC04PLVWBS321", "DC04PLVWBS322"]),
+    AppServers("DARTUI", ["DC04PLVWBS323","DC04PLVWBS324"]),
+    AppServers("PKM", ["DC04PLVWBS371","DC04PLVWBS372","DC04PLVWBS373","DC04PLVWBS374"]),
+    AppServers("Roster<br>Automation", [
+        "DC04PLVSPS300","DC04PLVSPS301","VA10PLVPEG360","VAAZPLVSPS300","VAAZPLVSPS301"
+    ]),
+    AppServers("SPSMDM<br>Python", ["VA10PLVSPS300","VA10PLVSPS301"]),
+    AppServers("MDM/Match", ["VA10PLVWBS687","VA10PLVWBS688"]),
+    AppServers("Provider360 PDS", ["VA10PLVWBS669"]),
+    AppServers("Prov360/<br>ProvRestore<br>/SPSAudit", ["VA10PLVWBS669","VA10PLVWBS670"]),
+    AppServers("PDT", ["DC04PLVCFE305"]),
+    AppServers("BPD", ["DC04PLVCFE306"]),
+    AppServers("KAFKA", ["VA10PLVKAF312","VA10PLVKAF313"]),
+    AppServers("PARES<br>Inactive", ["VA10PLVWBS670","VA10PLVIHS554","VA10PLVIHS555"]),
+    AppServers("CoreServices<br>Inactive", ["VA10PLVWBS761","VA10PLVWBS762"]),
+    AppServers("PEGA<br>Inactive", [
+        "VA10PLVPEG361","VA10PLVPEG362","VA10PLVPEG363","VA10PLVPEG447","VA10PLVPEG448",
+        "VA10PLVPEG449","VA10PLVPEG460","VA10PLVPEG461","VA10PLVPEG462","VA10PLVPEG463",
+        "VA10PLVPEG493","VA10PLVPEG494","VA10PLVPEG495","VA10PLVPEG496","VA10PLVPEG497",
+        "VA10PLVPEG498","VA10PLVPEG552","VA10PLVPEG553"
+    ]),
+    AppServers("Sanctioned Provider<br>System Inactive", ["DC04PLVSPS302","DC04PLVSPS303"]),
+    AppServers("ePACT", ["VA10PLVSAW308"]),
+]
+
+SSH_USER = "an453200ad"
+SSH_PASS = "Dxe%9erW6bBy#6SgZBqk"
+TIMEOUT = 15
+MAX_WORKERS = 10
+
+APPLICATION_JAVA_PATHS = [
+    "/apps/oracle/product/19.3/19c_Full/jdk/bin/java",
+    "/apps/oracle/product/19.3/19c_Full/jdk/jre/bin/java",
+    "/apps/oracle/product/19.3/19c_Full/client/stage/Components/oracle.jdk/1.8.0.201.0/1/DataFiles/Expanded/filegroup2/jre/bin/java"
+]
+
+SPECIAL_APPS = ["Roster<br>Automation", "SPSMDM<br>Python"]
+
+# Email Configuration
+#EMAIL_TO = "Sure, Venkatesh <Venkatesh.Sure@carelon.com>"
+#EMAIL_CC = "Sure, Venkatesh <Venkatesh.Sure@carelon.com>"
+EMAIL_TO = "dl-T-SPS-Infrastructure-offshore <dl-T-SPS-Infrastructure-offshore@legato.com>"
+EMAIL_CC = "Ande, Sreedevi <sreedevi.ande@elevancehealth.com>; Singh, Sushant <Sushant.Singh@carelon.com>"
+EMAIL_SUBJECT = "[SPS] PROD Environment Servers System Java, JRE Version, VENDOR and Application Paths Java, JRE, VENDOR Details Report"
+EXCEL_REPORT_NAME = "Java_Version_Report.xlsx"
+
+# ====================== LOGGING ======================
+logging.basicConfig(level=logging.INFO, format='%(message)s')
+logger = logging.getLogger(__name__)
+logging.getLogger("paramiko.transport").setLevel(logging.WARNING)
+
+# ====================== JAVA PARSING ======================
+
+def parse_java_output(output: str) -> Tuple[str, str, str]:
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    
+    version = "Not Available"
+    runtime_env = "Not Available"
+    vendor = "Not Available"
+    
+    if lines:
+        first_line = lines[0].replace('"', '').strip()
+        if "version" in first_line.lower():
+            version = first_line.split("version")[-1].strip()
+        else:
+            version = first_line
+    
+    for line in lines:
+        if "Runtime Environment" in line:
+            runtime_env = line
+        elif any(x in line for x in ["Server VM", "64-Bit", "OpenJDK", "Zulu", "Temurin"]):
+            vendor = line
+    
+    return version, runtime_env, vendor
+
+
+def get_java_details(ssh: paramiko.SSHClient, command: str) -> Dict:
+    try:
+        _, stdout, stderr = ssh.exec_command(f"{command} -version", timeout=10)
+        output = (stderr.read().decode('utf-8') + stdout.read().decode('utf-8')).strip()
+        
+        if not output or "command not found" in output.lower() or "bash: java:" in output.lower():
+            return {"Java Version": "Not Installed", "OpenJDK Runtime Environment": "Not Installed", "Vendor Details": "Not Installed"}
+        
+        ver, runtime, vendor = parse_java_output(output)
+        return {
+            "Java Version": ver,
+            "OpenJDK Runtime Environment": runtime,
+            "Vendor Details": vendor
+        }
+    except Exception:
+        return {"Java Version": "Error", "OpenJDK Runtime Environment": "Error", "Vendor Details": "Error"}
+
+
+def get_application_java(ssh: paramiko.SSHClient, app_name: str) -> str:
+    if app_name not in SPECIAL_APPS:
+        return "NA"
+    
+    result_lines = []
+    for path in APPLICATION_JAVA_PATHS:
+        details = get_java_details(ssh, path)
+        result_lines.append(
+            f"Version : {details['Java Version']}\n"
+            f"Runtime : {details['OpenJDK Runtime Environment']}\n"
+            f"Vendor : {details['Vendor Details']}\n"
+            f"Path : {path}\n"
+        )
+    return "\n\n".join(result_lines)
+
+
+def check_server(server: str, app_name: str, index: int) -> Dict:
+    row = {
+        "Index": index,
+        "Application": app_name,
+        "Server": server,
+        "System Java Version": "Pending",
+        "System OpenJDK Runtime": "Pending",
+        "System Vendor OpenJDK Details": "Pending",
+        "Application Java Details": "Pending"
+    }
+    
+    try:
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(hostname=server, username=SSH_USER, password=SSH_PASS,
+                    timeout=TIMEOUT, allow_agent=False, look_for_keys=False)
+        
+        shell = ssh.invoke_shell()
+        time.sleep(2)
+        if shell.recv_ready():
+            shell.recv(10000)
+
+        sys_details = get_java_details(ssh, "java")
+        row["System Java Version"] = sys_details["Java Version"]
+        row["System OpenJDK Runtime"] = sys_details["OpenJDK Runtime Environment"]
+        row["System Vendor OpenJDK Details"] = sys_details["Vendor Details"]
+        
+        row["Application Java Details"] = get_application_java(ssh, app_name)
+        
+        ssh.close()
+        logger.info(f"✅ {server} audited.")
+       
+    except Exception as e:
+        err = "Connection Failed"
+        row["System Java Version"] = err
+        row["System OpenJDK Runtime"] = err
+        row["System Vendor OpenJDK Details"] = err
+        row["Application Java Details"] = err
+        logger.error(f"❌ {server} failed: {str(e)[:60]}")
+   
+    return row
+
+
+def create_html_report(data: List[Dict]) -> str:
+    html = """
+    <table border="1" style="border-collapse: collapse; width:100%; font-family: Calibri, sans-serif; font-size: 11pt;">
+        <thead>
+            <tr style="background-color: #2E7D32; text-align: center; color: white;">
+                <th style="padding:10px;">Application Name</th>
+                <th style="padding:10px;">Server</th>
+                <th style="padding:10px;">System Java Version</th>
+                <th style="padding:10px;">System OpenJDK Runtime</th>
+                <th style="padding:10px;">System Vendor OpenJDK Details</th>
+                <th style="padding:10px;">Application Java Version for Particular Paths</th>
+            </tr>
+        </thead>
+        <tbody>
+    """
+   
+    df = pd.DataFrame(data)
+    app_counts = df['Application'].value_counts(sort=False)
+    current_app = ""
+    
+    for _, row in df.iterrows():
+        is_special = row['Application'] in SPECIAL_APPS
+        align_style = "left" if is_special else "center"
+        app_java = str(row["Application Java Details"])
+        
+        bg_color = "#f8d7da" if "Failed" in app_java or "Error" in app_java else \
+                   "#d4edda" if any(x in app_java for x in ["17.", "11.", "1.8"]) else "#ffffff"
+
+        html += "<tr>"
+        if row['Application'] != current_app:
+            count = app_counts[row['Application']]
+            html += f'<td rowspan="{count}" style="background-color: #E8F5E9; font-weight: bold; text-align: center; vertical-align: middle;">{row["Application"]}</td>'
+            current_app = row['Application']
+       
+        html += f'<td style="padding:6px; text-align: center;">{row["Server"]}</td>'
+        html += f'<td style="padding:6px; text-align: center;">{row["System Java Version"]}</td>'
+        html += f'<td style="padding:6px; text-align: center; white-space: pre-wrap;">{row["System OpenJDK Runtime"]}</td>'
+        html += f'<td style="padding:6px; text-align: center; white-space: pre-wrap;">{row["System Vendor OpenJDK Details"]}</td>'
+       
+        cell_content = app_java.replace('\n', '<br>')
+        html += f'<td style="padding:6px; background-color: {bg_color}; text-align: {align_style}; white-space: pre-wrap;">{cell_content}</td>'
+        html += "</tr>"
+   
+    html += "</tbody></table>"
+    return html
+
+
+def draft_email(data: List[Dict]):
+    try:
+        excel_file = os.path.abspath(EXCEL_REPORT_NAME)
+        
+        outlook = win32.Dispatch('outlook.application')
+        mail = outlook.CreateItem(0)
+        mail.To = EMAIL_TO
+        mail.CC = EMAIL_CC
+        mail.Subject = EMAIL_SUBJECT
+        mail.HTMLBody = f"""
+        <html><body>
+            <p>Hi Team,</p>
+            <p>Please find the detailed Java version verification report below:</p>
+            {create_html_report(data)}
+            <p><b>Note:</b> Detailed Application Java path checking is performed only for <b>Roster Automation</b> and <b>SPSMDM Python</b> servers.</p>
+            <p>Excel report is attached for your reference.</p>
+
+            <p><i>This is an automated report.</i></p>
+            <p>Regards,<br><b>Sure Venkatesh</b></p>
+        </body></html>"""
+        
+        # Attach Excel file
+        if os.path.exists(excel_file):
+            mail.Attachments.Add(excel_file)
+            logger.info(f"📎 Excel report attached: {EXCEL_REPORT_NAME}")
+        else:
+            logger.warning("⚠️ Excel file not found for attachment!")
+        
+        mail.Display()
+        logger.info("📧 Email Drafted successfully with attachment.")
+        
+    except Exception as e:
+        logger.error(f"Failed to send email: {e}")
+
+
+# ====================== MAIN ======================
+if __name__ == "__main__":
+    print("🚀 Starting Java Audit with Detailed OpenJDK & Vendor Information...\n")
+    
+    tasks = []
+    idx = 0
+    for app in INVENTORY:
+        for server in app.servers:
+            tasks.append((server, app.name, idx))
+            idx += 1
+
+    results = []
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {executor.submit(check_server, t[0], t[1], t[2]): t for t in tasks}
+        for future in as_completed(futures):
+            results.append(future.result())
+   
+    results.sort(key=lambda x: x['Index'])
+   
+    # Save Excel Report
+    final_df = pd.DataFrame(results).drop(columns=['Index'])
+    final_df.to_excel(EXCEL_REPORT_NAME, index=False)
+    print(f"💾 Excel report saved: {EXCEL_REPORT_NAME}")
+    
+    # Send Email with Attachment
+    draft_email(results)
+   
+    print("\n✅ Audit Complete!")
