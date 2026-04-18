@@ -1,465 +1,779 @@
-import paramiko
-import logging
-import pandas as pd
-import os
+import requests
+import urllib3
+import time
 import re
+from datetime import datetime, timedelta
 import win32com.client as win32
-from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
-from typing import List, Dict
+from collections import defaultdict
+import asyncio
+import os
+from playwright.async_api import async_playwright
 
-# ================== Time Zones ==================
+#Dependencies for Capturing ScreenShot
+#pip install playwright
+#playwright install chromium
+
+# Suppress insecure request warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 try:
     from zoneinfo import ZoneInfo
 except ImportError:
-    import pytz as ZoneInfo
+    import pytz as ZoneInfo # Fallback for older versions
 
+
+# ================== Configuration: Set Time Zones ==================
 IST = ZoneInfo("Asia/Kolkata")
 ET = ZoneInfo("America/New_York")
 fmt = "%Y-%m-%d %I:%M:%S %p %Z"
-
+#Start Time (No Microseconds)
 start_ist = datetime.now(IST).replace(microsecond=0)
 start_et = start_ist.astimezone(ET)
 
-print(f"\n🚀 SPS Non-Prod Env Application Running Java Process Auditing started at {start_ist.strftime(fmt)} / {start_et.strftime(fmt)}")
+print(f"\n🚀 All Prod Env URL's Checking started at {start_ist.strftime(fmt)} / {start_et.strftime(fmt)}")
+print("Checking URL's Status, Please Wait...\n")
 
-# ====================== CONFIGURATION ======================
 
-@dataclass
-class AppServers:
-    name: str
-    servers: List[str]
-
-# === SERVER INVENTORY ===
-INVENTORY: List[AppServers] = [
-    AppServers("DEVPEGA", ["DC04DLVPEG318","DC04DLVPEG319","DC04DLVPEG323","DC04DLVPEG324","DC04DLVPEG326","DC04DLVPEG327","DC04DLVPEG329","DC04DLVPEG330","DC04DLVPEG332","DC04DLVPEG333","DC04DLVPEG335","DC04DLVPEG336","DC04DLVPEG338","DC04DLVPEG339"]),
-    AppServers("SBXPEGA", ["DC04DLVPEG317","DC04DLVPEG322","DC04DLVPEG325","DC04DLVPEG328","DC04DLVPEG331","DC04DLVPEG334","DC04DLVPEG337"]),
-    AppServers("SITPEGA", ["DC04TLVPEG413","DC04TLVPEG414","DC04TLVPEG433","DC04TLVPEG434","DC04TLVPEG452","DC04TLVPEG453","DC04TLVPEG456","DC04TLVPEG457","DC04TLVPEG460","DC04TLVPEG461","DC04TLVPEG464","DC04TLVPEG465","DC04TLVPEG468","DC04TLVPEG469"]),
-    AppServers("UATPEGA", ["DC04TLVPEG415","DC04TLVPEG416","DC04TLVPEG435","DC04TLVPEG436","DC04TLVPEG454","DC04TLVPEG455","DC04TLVPEG458","DC04TLVPEG459","DC04TLVPEG462","DC04TLVPEG463","DC04TLVPEG466","DC04TLVPEG467","DC04TLVPEG470","DC04TLVPEG471"]),
-    AppServers("PERF1PEGA", ["VA10TLVPEG366","VA10TLVPEG367","VA10TLVPEG368","DC04TLVPEG417","DC04TLVPEG418","DC04TLVPEG419","DC04TLVPEG420","DC04TLVPEG421","DC04TLVPEG422","DC04TLVPEG423","DC04TLVPEG424","DC04TLVPEG425","DC04TLVPEG426","DC04TLVPEG427","DC04TLVPEG428","DC04TLVPEG429","DC04TLVPEG430","DC04TLVPEG431"]),
-    AppServers("PERF2PEGA", ["VA10TLVPEG363","VA10TLVPEG364","VA10TLVPEG365","DC04TLVPEG437","DC04TLVPEG438","DC04TLVPEG439","DC04TLVPEG440","DC04TLVPEG441","DC04TLVPEG442","DC04TLVPEG443","DC04TLVPEG444","DC04TLVPEG445","DC04TLVPEG446","DC04TLVPEG447","DC04TLVPEG448","DC04TLVPEG449","DC04TLVPEG450","DC04TLVPEG451"]),
-    AppServers("RosterAutomation", ["DC04DLVSPS300","DC04TLVSPS302","DC04TLVSPS306","DC04TLVSPS304","DC04TLVSPS307","VA33TLVPEG414","VAAZTLVSPS300","DC04TLVSPS305","DC04TLVSPS308","DC04TLVSPS300","DC04TLVSPS301","VA10TLVPEG331","VAAZTLVSPS301","VAAZTLVSPS302"]),
-    AppServers("SPSMDMPython", ["VA10DLVSPS300","VA10DLVSPS301","VA10TLVSPS300","VA10TLVSPS301","VA10TLVSPS302","VA10TLVSPS303","VA33DLVSPS300","VA33DLVSPS301","VA33DLVSPS302","VA33DLVSPS303","VA33TLVSPS300","VA33TLVSPS301","VA33TLVSPS302","VA33TLVSPS303","VA33TLVSPS304"]),
-    AppServers("SPSCore Services", ["VA33DLVWBS388","VA33DLVWBS389","VA33DLVWBS390","VA33DLVWBS391","VA33DLVWBS382","VA33DLVWBS383","VA33DLVWBS384","VA33DLVWBS387","VA33DLVWBS400","VA33DLVWBS401","VA33DLVWBS381","VA33DLVWBS385","VA33DLVWBS386","VA33DLVWBS398","VA33DLVWBS399","VA33DLVWBS392","VA33DLVWBS396","VA33DLVWBS397","VA33DLVWBS404","VA33DLVWBS405","VA33DLVWBS406","VA33DLVWBS407","VA33DLVWBS313","VA33DLVWBS314","VA33DLVWBS370","VA33DLVWBS371","DC04DLVWBS338","DC04DLVWBS339","VA10DLVWBS358","VA10DLVWBS359","DC04TLVWBS398","DC04TLVWBS399","VA33TLVWBS543","VA33TLVWBS568","VA33TLVWBS356","VA33TLVWBS357","VA33TLVWBS539","VA33TLVWBS540","VA10TLVWBS710","VA10TLVWBS711","VA10TLVWBS712","VA10TLVWBS713","VA10TLVWBS714","VA10TLVWBS715","VA10TLVWBS716","VA10TLVWBS717","VA10TLVWBS718","VA10TLVWBS719","VA10TLVWBS720","VA10TLVWBS721","VA33TLVWBS544","VA33TLVWBS545","DC04TLVWBS396","DC04TLVWBS397","VA33TLVWBS569","VA33TLVWBS570","VA33TLVWBS524","VA33TLVWBS574","VA33TLVWBS575","VA33TLVWBS358","VA33TLVWBS541","VA33TLVWBS542","VA33TLVWBS538","VA10TLVWBS739","VA33TLVWBS576","DC04TLVWBS370"]),
-    AppServers("UIX", ["DC04DLVWBS342","DC04DLVWBS309","DC04TLVWBS426","DC04TLVWBS325","DC04TLVWBS326","DC04TLVWBS427","DC04TLVWBS428","DC04TLVWBS339","DC04TLVWBS340"]),
-    AppServers("DARTUI", ["DC04DLVWBS318","DC04TLVWBS342","DC04TLVWBS341","DC04TLVWBS345","DC04TLVWBS346","DC04TLVWBS347"]),
-    AppServers("PKM", ["DC04DLVWBS331","DC04DLVWBS330","DC04TLVWBS367","DC04TLVWBS365","DC04TLVWBS369","DC04TLVWBS368","DC04TLVWBS386","DC04TLVWBS387","DC04TLVWBS388","DC04TLVWBS389"]),
-    AppServers("MDM/MATCH", ["VA33DLVWBS402","VA33DLVWBS412","VA33DLVWBS413","VA33TLVWBS571","VA33TLVWBS577","VA33TLVWBS578","VA10TLVWBS630","VA33TLVWBS572","VA33TLVWBS579","VA10TLVWBS628","VA10TLVWBS629","VA10TLVWBS631","VA10DLVWBS354"]),
-    AppServers("CyberARK POC", ["VA10TLVPEG357","VA10TLVPEG358"]),
-    AppServers("SPSNMS TOOL", ["VA10TLVPEG332"]),
-    AppServers("Repurposed PEGA", ["VA10DLVPEG303","VA33DLVPEG365","VA33DLVPEG366"]),
-    AppServers("KAFKA", ["VA10TLVKAF300","VA10TLVKAF301","VA33DLVKAF307","VA33TLVKAF323","VA33TLVKAF324"]),
-    AppServers("PARESInactive Prov360/ProvRestore/SPSAudit", ["VA33DLVWBS376","VA33TLVWBS555","VA33TLVWBS558"]),
-    AppServers("MasterData EngineCalloutApp", ["VA10N10156","VA10N10157"]),
-    AppServers("EnterpriseProvider<br>DatabaseSolution<br>LegacyApp", ["VAATHMR205","VAATHMR207","VAATHMR209"]),
-    AppServers("NPIBatchEngine", ["VAATHMR191","VAATHMR192","VAATHMR246","VAATHMR247"]),
-    AppServers("Database-DB2/UDB", ["VAATHMR310","VAATHMR311"]),
-    AppServers("PARES Inactive", ["VA33TLVWBS559","VA33TLVWBS560","VA33TLVIHS569","VA33TLVIHS570","VA33TLVIHS571","VA33TLVIHS572"]),
-    AppServers("PEGA Inactive", ["VA33TLVATC312","VA33TLVATC313","VA33TLVATC314","VA33TLVATC315","VA33TLVATC316","VA33TLVATC317","VA33TLVIHS588","VA33TLVIHS589","VA33TLVIHS590"]),
-    AppServers("CAREMOREInactive", ["VAAZTLVWBS311.CAREMORE.COM","VAAZTLVWBS312.CAREMORE.COM","VAAZTLVWBS313.CAREMORE.COM","VAAZTLVWBS314.CAREMORE.COM","VAAZTLVWBS315.CAREMORE.COM"]),
-    AppServers("Sanctioned ProviderSystem Inactive", ["DC04DLVSPS301","DC04TLVSPS309","DC04TLVSPS310","DC04TLVSPS311","DC04TLVSPS312"]),
-    AppServers("SPSCoreService Inactive", ["VA10TLVWBS740"]),
-    AppServers("Blue Provider Database", ["VA33DLVORC325","VA10TLVORC307"]),
-    AppServers("SPS DD SOA Consumption layer", ["DC04DLVMDB312"]),
+# ================== MONITOR LIST FOR SCREENSHOTS ==================
+# Screenshot monitoring list for F5 pool status URLs
+MONITOR_LIST = [
+    {"url": "https://sps.elevancehealth.com/?f5poolstatus", "name": "PEGA SPS F5 Pool Status"},
+    {"url": "https://spspegautility.elevancehealth.com/prweb/?f5poolstatus", "name": "PEGA SPS UTILITY F5 Pool Status"},
+    {"url": "https://pdmapp.elevancehealth.com/prweb/?f5poolstatus", "name": "PEGA PDMAPP F5 Pool Status"},
+    {"url": "https://spsservices.anthem.com/?f5poolstatus", "name": "SPS Core Service F5 Pool Status"},
+    {"url": "https://paresspsservices.anthem.com/?f5poolstatus", "name": "PARES Core Service F5 Pool Status"},
+    {"url": "https://spsuixservices.anthem.com/?f5poolstatus", "name": "UIX Core Service F5 Pool Status"},
+    {"url": "https://provider360.anthem.com/pdsservices/?f5poolstatus", "name": "Provider360 PDS Services F5 Pool Status"},
+    {"url": "https://provnexus.prod.elevancehealth.com/?f5poolstatus", "name": "ProvNexus Services F5 Pool Status"},
+    {"url": "https://spsdartui.anthem.com/?f5poolstatus", "name": "SPSDARTUI F5 Pool Status"},
+    {"url": "https://pdm-pkm.anthem.com/?f5poolstatus", "name": "PKM F5 Pool Status"},
+    {"url": "https://pdm-uix.anthem.com/?f5poolstatus", "name": "UIX F5 Pool Status"},
+    {"url": "https://providerrma.elevancehealth.com/?f5poolstatus", "name": "ROSTER AUTOMATION F5 Pool Status"},
+    {"url": "https://services.provnexus.elevancehealth.com/?f5poolstatus", "name": "Prov360 F5 Pool Status"},
+    {"url": "https://spsrestore.elevancehealth.com/?f5poolstatus", "name": "SPSProvRestore F5 Pool Status"},
+    {"url": "https://spsaudithistory.elevancehealth.com/?f5poolstatus", "name": "SPSAuditHistory F5 Pool Status"}
 ]
 
-# ====================== CREDENTIALS ======================
-SSH_USER = "an453200ad"
-SSH_PASS = "LQDWwp3G6GVtR!%qKTGj"
-STANDARDACCOUNT_USER = "ah09451"
-STANDARDACCOUNT_PASS = "Singl@Bor1ng"
-STANDARDACCOUNT_CREDENTIAL_APPS = ["Database-DB2/UDB"]
-
-TIMEOUT = 15
-MAX_WORKERS = 12
-
-# Email Configuration
-EMAIL_TO = "dl-T-SPS-Infrastructure-offshore <dl-T-SPS-Infrastructure-offshore@legato.com>"
-EMAIL_CC = "Ande, Sreedevi <sreedevi.ande@elevancehealth.com>; Singh, Sushant <Sushant.Singh@carelon.com>"
-EMAIL_SUBJECT = "[SPS] Non-PROD Environment - Running Application Process Java Versions Report"
-
-# ====================== LOGGING ======================
-logging.basicConfig(level=logging.INFO, format='%(message)s')
-logger = logging.getLogger(__name__)
-logging.getLogger("paramiko.transport").setLevel(logging.WARNING)
-
-# ====================== HELPER FUNCTIONS ======================
-# Using a tuple for multiple prefixes
-AIX_PREFIXES = ("VAATHMR", "VA10N")
-
-def is_aix_server(server: str) -> bool:
-    """Checks if a server string identifies an AIX system based on multiple prefixes."""
-    if not server:
-        return False
-    # .startswith() accepts a tuple and returns True if any match
-    return server.strip().upper().startswith(AIX_PREFIXES)
-
-def get_credentials(app_name: str):
-    if app_name in STANDARDACCOUNT_CREDENTIAL_APPS:
-        logger.info(f"🔑 Using STANDARDACCOUNT credentials for: {app_name}")
-        return STANDARDACCOUNT_USER, STANDARDACCOUNT_PASS
-    return SSH_USER, SSH_PASS
-
-def get_ps_command(is_aix: bool) -> str:
-    if is_aix:
-        return "ps -ef -o pid,args | grep '/bin/[j]ava' | grep -v grep"
-    else:
-        return "ps -ef | grep '[b]in/java' | grep -v grep"
-
-def extract_java_path(line: str, is_aix: bool) -> str:
-    parts = line.strip().split()
-    for part in parts:
-        if 'bin/java' in part.lower():
-            return part
-    return parts[-1] if parts else ""
-
-def get_running_java_processes(ssh: paramiko.SSHClient, is_aix: bool) -> List[Dict]:
+# ================== ASYNC SCREENSHOT FUNCTION ==================
+async def capture_screenshot(browser, url, name, output_dir="screenshots"):
+    """Captures a single screenshot with isolated browser context."""
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    # Create a new context for better isolation
+    context = await browser.new_context(
+        viewport={'width': 1200, 'height': 920},
+        ignore_https_errors=True,
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    )
+    
+    page = await context.new_page()
+    output_path = os.path.abspath(os.path.join(output_dir, f"{name}.png"))
+    
     try:
-        ps_cmd = get_ps_command(is_aix)
-        _, stdout, _ = ssh.exec_command(ps_cmd, timeout=15)
-        ps_output = stdout.read().decode('utf-8').strip()
-
-        if not ps_output:
-            return []
-
-        processes = []
-        for line in ps_output.split('\n'):
-            line = line.strip()
-            if not line:
-                continue
-
-            java_path = extract_java_path(line, is_aix)
-            if not java_path or 'grep' in java_path.lower():
-                continue
-
-            classification = "Unknown"
-            l_line = line.lower()
-
-            # === FIXED: Handle --clean processes ===
-            if "--clean" in line:
-                match = re.search(r'(\S+)\s+--clean', line)
-                if match:
-                    classification = match.group(1).strip()
-                else:
-                    classification = "Clean Restart Process"
-            # Existing rules
-            elif "/opt/instana/agent/" in l_line: classification = "Instana Agent"
-            elif "ucd" in l_line or "/opt/IBM/UCD" in line: classification = "UCD Agent"
-            elif "semeru" in l_line or "openj9" in line: classification = "IBM Semeru/OpenJ9 JDK Version"
-            elif "/u01/app/oracle/product/agent_13.5" in l_line: classification = "OJDBC Agent"
-            elif "/apps/tomcat9/kafka" in l_line: classification = "Application Kafka Process"
-            elif "/apps/appd/machineagent" in l_line: classification = "MachineAgent Process"
-            elif "/apps/bamboo_home" in l_line or "bamboo-agent" in l_line: classification = "Bamboo Agent Process"
-            elif any(x in l_line for x in ["srctmagc", "srctmag5", "/controlm/ctmagt64", "srcctmag"]): classification = "Control M Job Process"
-            elif "sps_mdm" in l_line:
-                info = " ".join(line.split()[-4:]) if len(line.split()) > 4 else ""
-                classification = info.replace("/usr/WebSphere/AppServer/profiles/", "").replace("/config", "")
-            elif "-Didentification.nodeid=" in line:
-                match = re.search(r'-Didentification\.nodeid=(\S+)', line)
-                classification = match.group(1) if match else "Node Process"
-            elif "fbda" in l_line: classification = "FBDA"
-            elif "pds" in l_line:
-                classification = line.split()[-1].split('/')[-1] if line.split() else "PDS"
-            elif "/wsapps/cores/CHANGEME" in line:
-                parts = line.strip().split()
-                classification = parts[-1] if parts else "Core Service"
-            elif "/wsapps/cores/" in line:
-                match = re.search(r'/wsapps/cores/([^/\s]+)', line)
-                classification = match.group(1) if match else "Core Service"
-            elif "/usr/WebSphere/Liberty/bin/" in line:
-                match = re.search(r'ws-server\.jar\s+(\S+)', line)
-                if match:
-                    classification = match.group(1)
-                else:
-                    classification = "Liberty Server"
-            elif "/usr/WebSphere/AppServer" in l_line:
-                info = " ".join(line.split()[-4:]) if len(line.split()) > 4 else ""
-                classification = info.replace("/usr/WebSphere/AppServer/profiles/", "").replace("/config", "")
-            elif "com.initiate.server.launcher.jar" in l_line:
-                match = re.search(r'com\.initiate\.server\.launcher\.jar:(.*?)/conf', line)
-                if match:
-                    raw_path = match.group(1)
-                    classification = raw_path.replace("/usr/ibm/initiate/initiate_v10.1/instances/", "").replace("/usr/ibm/initiate/initiate_v10.1/entmgr/", "")
-                else:
-                    classification = "Initiate Engine"
-
-            if classification == "Unknown":
-                continue
-
-            details = get_java_details(ssh, java_path)
-            processes.append({"Process Type": classification, "Path": java_path, **details})
-
-        return processes
+        print(f"Capturing screenshot: {url}")
+        await page.goto(url, wait_until="networkidle", timeout=60000)
+        await page.screenshot(path=output_path, full_page=True)
+        return output_path
     except Exception as e:
-        logger.error(f"Error fetching processes: {e}")
-        return []
-
-def get_java_details(ssh: paramiko.SSHClient, java_path: str) -> Dict:
-    try:
-        cmd = f"{java_path} -version" if '/' in java_path else "java -version"
-        _, stdout, stderr = ssh.exec_command(cmd, timeout=12)
-        output = (stderr.read().decode('utf-8', errors='ignore') + 
-                  stdout.read().decode('utf-8', errors='ignore')).strip()
-
-        if any(x in output.lower() for x in ["permission denied", "cannot execute", "not found"]):
-            base_info = {"Java Version": "Permission Denied", "Runtime": "Permission Denied", "Vendor": "Permission Denied"}
-        else:
-            base_info = parse_java_output(output)
-        vendor_name = get_java_vendor_name(ssh, java_path)
-        return {**base_info, "Vendor Name": vendor_name}
-    except Exception:
-        return {"Java Version": "Error", "Runtime": "Error", "Vendor": "Error", "Vendor Name": "Permission Denied / Error"}
-
-def parse_java_output(output: str) -> Dict:
-    # 1. Extract Version: Works for "java version" or "openjdk version"
-    v_match = re.search(r'version "([^"]+)"', output)
-    version = v_match.group(1) if v_match else "N/A"
-    
-    # 2. Extract Runtime: Updated to handle IBM Semeru and standard JRE strings
-    # Looks for any line containing "Runtime" and takes the relevant part
-    r_match = re.search(r'^.*Runtime.*$', output, re.MULTILINE | re.IGNORECASE)
-    runtime = r_match.group(0).strip() if r_match else "N/A"
-    
-    # 3. Extract VM/Vendor info
-    vm_match = re.search(r'(?:vm|server) ([^\n]+)', output, re.IGNORECASE)
-    vendor = vm_match.group(1).strip() if vm_match else "N/A"
-    
-    return {"Java Version": version, "Runtime": runtime, "Vendor": vendor}
-
-def get_java_vendor_name(ssh: paramiko.SSHClient, java_path: str) -> str:
-    try:
-        cmd = f'{java_path} -XshowSettings:properties -version 2>&1 | grep "java.vm.vendor" | awk -F= \'{{print $2}}\' | xargs' \
-              if java_path and '/' in java_path else 'java -XshowSettings:properties -version 2>&1 | grep "java.vm.vendor" | awk -F= \'{{print $2}}\' | xargs'
-        _, stdout, _ = ssh.exec_command(cmd, timeout=12)
-        result = stdout.read().decode('utf-8', errors='ignore').strip()
-        return result if result else "N/A"
-    except Exception:
-        return "Permission Denied / Error"
-
-def check_server(server: str, app_name: str) -> List[Dict]:
-    rows = []
-    ssh = None
-    try:
-        username, password = get_credentials(app_name)
-        is_aix = is_aix_server(server)
-
-        ssh = paramiko.SSHClient()
-        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        ssh.connect(hostname=server, username=username, password=password,
-                    timeout=TIMEOUT, allow_agent=False, look_for_keys=False)
-
-        processes = get_running_java_processes(ssh, is_aix)
-
-        if not processes:
-            rows.append({"Application": app_name, "Server": server, "Process Type": "No Java Processes Found",
-                         "Path": "N/A", "Java Version": "N/A", "Runtime": "N/A", "Vendor": "N/A", "Vendor Name": "N/A"})
-        else:
-            for proc in processes:
-                rows.append({"Application": app_name, "Server": server, **proc})
-
-        logger.info(f"✅ {server} ({'AIX' if is_aix else 'Linux'}) audited.")
-    except Exception as e:
-        rows.append({"Application": app_name, "Server": server, "Process Type": "Connection Failed",
-                     "Path": "N/A", "Java Version": str(e)[:100], "Runtime": "N/A", "Vendor": "N/A", "Vendor Name": "N/A"})
-        logger.error(f"❌ {server} failed: {str(e)[:120]}")
+        print(f"Error capturing {url}: {e}")
+        return None
     finally:
-        if ssh:
-            ssh.close()
-    return rows
+        await context.close()  # Close the entire context, not just the page
 
-def highlight_version(val, vendor_name="", runtime=""):
-    if not isinstance(val, str):
-        return val
-    if "Red Hat" in vendor_name and "Red_Hat-11.0" in runtime:
-        return f'<span style="background-color: #FF6B6B; color: white; font-weight: bold; padding: 3px 6px; border-radius: 4px;">{val}</span>'
-    if "Red Hat" in vendor_name and re.search(r'1\.8\.0_', runtime):
-        return f'<span style="background-color: #FFEB3B; color: black; font-weight: bold; padding: 3px 6px; border-radius: 4px;">{val}</span>'
-    return val
+async def monitor_all(data_list):
+    """Orchestrates concurrent screenshot captures."""
+    async with async_playwright() as p:
+        browser = await p.chromium.launch()
+        tasks = [capture_screenshot(browser, item['url'], item['name']) for item in data_list]
+        file_paths = await asyncio.gather(*tasks)
+        await browser.close()
+        return [f for f in file_paths if f]
 
-
-def get_audited_summary(data: List[Dict]) -> Dict:
-    df = pd.DataFrame(data)
-    total_servers = df['Server'].nunique()
+# ================== URL STATUS CHECK ==================
+def get_status(url, custom_timeout=10):
+    """
+    Checks URL status mimicking Microsoft Edge InPrivate mode.
+    """
+    url = url.strip()
     
-    immediate = df[
-        (df['Vendor Name'].str.contains('Red Hat', na=False)) & 
-        (df['Runtime'].str.contains('Red_Hat-11.0', na=False))
-    ]['Server'].nunique()
-    
-    upgrade = df[
-        (df['Vendor Name'].str.contains('Red Hat', na=False)) & 
-        (df['Runtime'].str.contains(r'1\.8\.0_', na=False))
-    ]['Server'].nunique()
-    
-    return {
-        "Total Servers Audited": total_servers,
-        "Servers that Need Immediate Attention (Red Hat OpenJDK 11 - EOL)": immediate,
-        "Servers Requiring Upgrade (Red Hat OpenJDK 8 - EOL Nov 2026)": upgrade
+    # 1. Default Headers
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 Edg/122.0.0.0",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache"
     }
 
-def create_html_report(data: List[Dict]) -> str:
-    if not data:
-        return "<p>No data found during audit.</p>"
+    # 2. Specific Headers for Pares Core Services F5 URL
+    target_url = "https://paresspsservices.anthem.com/spsservices"
+    if url == target_url:
+    # Comprehensive Incognito-style headers
+        headers.update({
+            "User-Agent": "Mozilla/149.0.2 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.7727.56 Safari/537.36 Edg/147.0.3912.60",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+            "Sec-Ch-Ua": '"Microsoft Edge";v="146", "Chromium";v="147", "Not?A_Brand";v="99"',
+            "Sec-Ch-Ua-Mobile": "?0",
+            "Sec-Ch-Ua-Platform": '"Windows"',
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none"
+        })
 
-    df = pd.DataFrame(data)
-    app_order = {app.name: i for i, app in enumerate(INVENTORY)}
-    df['app_order'] = df['Application'].map(app_order).fillna(999)
-    df = df.sort_values(by=['app_order', 'Server']).reset_index(drop=True)
-    df = df.drop(columns=['app_order'])
-
-    html = """<table border="1" style="border-collapse: collapse; width:120%; max-width: 1450px; 
-                font-family: Calibri, sans-serif; font-size: 10pt; table-layout: fixed;">
-        <thead>
-            <tr style="background-color: #2E7D32; color: white; text-align: center;">
-                <th style="width: 2%; padding:8px;">Application</th>
-                <th style="width: 2%; padding:8px;">Server</th>
-                <th style="width: 6%; padding:8px;">Process Type</th>
-                <th style="width: 19%; padding:8px;">Path</th>
-                <th style="width: 9%; padding:8px;">Java Version</th>
-                <th style="width: 20%; padding:8px;">Runtime</th>
-                <th style="width: 25%; padding:8px;">Vendor</th>
-                <th style="width: 6%; padding:8px;">Vendor Name</th>
-            </tr>
-        </thead>
-        <tbody>"""
-
-    app_counts = df['Application'].value_counts(sort=False).to_dict()
-    server_counts = df.groupby(['Application', 'Server']).size().to_dict()
-    processed_apps = set()
-    processed_servers = set()
-
-    for _, row in df.iterrows():
-        # Highlight row for Red Hat 11.0
-        row_style = ' style="background-color: #FFEBEE;"' if "Red Hat" in str(row.get('Vendor Name', '')) and "Red_Hat-11.0" in str(row.get('Runtime', '')) else ""
-        
-        html += f"<tr{row_style}>"
-
-        # Application Column (with rowspan)
-        app_name = row['Application']
-        if app_name not in processed_apps:
-            span = app_counts.get(app_name, 1)
-            html += f'''
-                <td rowspan="{span}" style="width:2%; background-color: #F1F8E9; 
-                font-weight: bold; text-align: center; vertical-align: middle; padding:6px; 
-                border-right: 2px solid #2E7D32;">{app_name}</td>'''
-            processed_apps.add(app_name)
-
-        # Server Column (with rowspan)
-        server_key = (app_name, row['Server'])
-        if server_key not in processed_servers:
-            span = server_counts.get(server_key, 1)
-            html += f'''
-                <td rowspan="{span}" style="width:2%; text-align: center; vertical-align: middle; 
-                font-weight: bold; padding:6px; border-right: 2px solid #2E7D32;">{row["Server"]}</td>'''
-            processed_servers.add(server_key)
-
-        # Remaining columns
-        html += f'<td style="width:2%; padding:5px; text-align:center;">{row["Process Type"]}</td>'
-        html += f'<td style="width:19%; padding:5px; font-family: Consolas, monospace; word-break: break-all;">{row["Path"]}</td>'
-        html += f'<td style="width:9%; padding:5px; text-align:center;">{row["Java Version"]}</td>'
-        html += f'<td style="width:20%; padding:5px; text-align:center;">{highlight_version(row["Runtime"], row.get("Vendor Name",""), row.get("Runtime",""))}</td>'
-        html += f'<td style="width:25%; padding:5px; text-align:center;">{highlight_version(row["Vendor"], row.get("Vendor Name",""), row.get("Runtime",""))}</td>'
-        html += f'<td style="width:6%; padding:5px; text-align:center;">{row.get("Vendor Name", "N/A")}</td>'
-        
-        html += "</tr>"
-
-    html += "</tbody></table>"
-    return html
-
-def draft_email(data: List[Dict], excel_path: str, summary: Dict):
-    print("\n📧 Drafting Outlook email...")
     try:
-        outlook = win32.Dispatch('outlook.application')
-        mail = outlook.CreateItem(0)
-        mail.To = EMAIL_TO
-        mail.CC = EMAIL_CC
-        mail.Subject = EMAIL_SUBJECT
+        # Use a fresh session with no cookies to simulate Incognito
+        session = requests.Session()
+        session.cookies.clear() 
 
-        table_html = create_html_report(data)
+        # No-verify and fresh session mimics InPrivate behavior
+        with requests.Session() as session:
+            response = session.get(
+                url, 
+                headers=headers, 
+                timeout=custom_timeout, 
+                allow_redirects=True, 
+                verify=False
+            )
+            status_code = response.status_code
+            style_base = "font-weight: bold; text-align: center;"
 
-        mail.HTMLBody = f"""
-        <html><body>
-            <p>Hi Team,</p>
-            <p>Please find the consolidated report of <b>Running Application Process Java Versions</b> across SPS Non-PROD servers:</p>
-            <p>SPS Non-Prod Env Application Running Java Process Auditing Started at <i>{start_et.strftime(fmt)}</i></p>   
+            if status_code == 200:
+                status_msg = f'<div style="color: green; {style_base}">UP and Running</div>'
             
-            <h3 style="color:#2E7D32;">📊 Audit Summary:</h3>
-            <ul>
-                <li><b>Total Servers Audited:</b> <span style="font-size:15pt;">{summary['Total Servers Audited']}</span></li>
-                <li><b style="color:#D32F2F;">Servers that Need Immediate Attention (Red Hat OpenJDK 11 - EOL):</b> <span style="font-size:15pt; color:#D32F2F;">{summary['Servers that Need Immediate Attention (Red Hat OpenJDK 11 - EOL)']}</span></li>
-                <li><b style="color:#F57C00;">Servers Requiring Upgrade (Red Hat OpenJDK 8 - EOL November 2026):</b> <span style="font-size:15pt; color:#F57C00;">{summary['Servers Requiring Upgrade (Red Hat OpenJDK 8 - EOL Nov 2026)']}</span></li>
-            </ul>
+            elif status_code == 404:
+                if any(x in url.upper() for x in ["WELLPOINT", "DC04", "VA10"]):
+                    status_msg = (
+                        '<div style="color: green; font-weight: bold; text-align:center;">JVM UP</div>'
+                        '<div style="color: red; font-weight: bold; text-align:center;">'
+                        'but URL was DOWN<br>Context Root Not Found'
+                        '</div>'
+                    )
+                else:
+                    status_msg = (
+                        '<div style="color: red; font-weight: bold; text-align:center;">'
+                        'URL was DOWN<br>Context Root Not Found'
+                        '</div>'
+                    )
+            
+            elif status_code in [500, 403, 503]:
+                status_msg = (
+                    f'<div style="color: red; {style_base}">'
+                    f'DOWN ({status_code})<br>Service Unavailable'
+                    f'</div>'
+                )           
+            
+            else:
+                status_msg = f'<div style="color: orange; {style_base}">Status: {status_code}</div>'
+            
+            return status_code, status_msg
 
-            {table_html}
-            <br>
-            <p><b style="color:red;">⚠ Important Note:</b><br>
-            • Red highlight → Red Hat OpenJDK 11.0.x (End of Support - Immediate Action Required)<br>
-            • Yellow highlight → Red Hat OpenJDK 8 (EOL by November 2026 - Plan Upgrade)</p>
-
-            <p>The full detailed report is attached as Excel.</p>
-	    <p>
-	       SPS Non-Prod Env Application Running Java Process Auditing Finished at <i>{end_et.strftime(fmt)}</i><br>
-	       SPS Non-Prod Env Application Running Java Process Audit Verified within <i>{duration_str}</i>
-	    </p>
-            <p><i>This is an automated report.</i></p>
-            <p>Regards,<br><b>Sure Venkatesh</b></p>
-        </body></html>"""
-
-        if os.path.exists(excel_path):
-            mail.Attachments.Add(excel_path)
-        mail.Display()
-        logger.info("✅ Outlook email draft created.")
+    except requests.exceptions.ConnectionError:
+        return "FAILED", '<div style="text-align: center;">This site can’t be reached<br>URL Refused to connect</div>'
+    except requests.exceptions.Timeout:
+        return "TIMEOUT", '<div style="text-align: center;">Server Timeout</div>'
     except Exception as e:
-        logger.error(f"Failed to draft email: {e}")
+        return "ERROR", str(e)
 
+# ================== CATEGORY & CLEANING FUNCTIONS ==================
+def get_category(env_name):
+    """Categorize environment names into predefined categories with comprehensive keyword mapping"""
+    if not env_name or not isinstance(env_name, str):
+        return 'OTHER'
+    
+    env_upper = env_name.upper().strip()
+    
+    # Define comprehensive category mappings with merged common words
+    category_keywords = {
+        'PEGA': ['PEGA', 'HAZELCAST', 'STREAM', 'SEARCH', 'BACKGROUND', 'BIX', 'AGENT', 'PDM', 'WEBUSER'],
+        'SPS CORE SERVICES': ['SPS CORE SERVICE'],
+        'PARES CORE SERVICES': ['PARES CORE SERVICE'],
+        'UIX CORE SERVICE': ['UIX CORE SERVICE'],
+        'PROVIDER360 PDS SERVICES': ['PROVIDER360', 'PDS'],
+        'PROVNEXUS SERVICES': ['PROVNEXUS', 'PROVNEXUS SERVICES'],
+        'ROSTER AUTOMATION': ['ROSTER AUTOMATION'],
+        'SPSDARTUI': ['SPSDARTUI'],
+        'PKM': ['PKM'],
+        'MATCH SERVER': ['MATCH SERVER'],
+        'NETWORKAI': ['NETWORKAI'],
+        'OEM': ['OEM', 'CONSOLE LOGIN'],
+        'PDT': ['PDT'],
+        'BPD': ['BPD'],
+        'UIX': ['UIX'],
+        'F5 PORTAL': ['F5 Portal', 'VIP',],
+        'APPVIEWX': ['APPVIEWX'],
+        'PARESOLD': ['PARESOLD'],
+        'PROV360SERVICES': ['PROV360SERVICES'],
+        'SPSPROVRESTORE': ['SPSPROVRESTORE'],
+        'SPSAUDITHISTORY': ['SPSAUDITHISTORY']
+    }
+  
+    # Check each category for matching keywords (prioritize longer matches first)
+    for category, keywords in category_keywords.items():
+        # Sort keywords by length (descending) to match longer phrases first
+        sorted_keywords = sorted(keywords, key=len, reverse=True)
+        for keyword in sorted_keywords:
+            if keyword in env_upper:
+                return category
+    
+    return 'OTHER'
 
-# ====================== MAIN ======================
-if __name__ == "__main__":
-    current_time = datetime.now().strftime("%Y%m%d_%H%M")
-    EXCEL_REPORT_NAME = f"NonProd_Application_RunningJava_Version_Details_{current_time}.xlsx"
+def clean_env_name(env_name):
+    """Remove category-related words from environment names with improved text processing"""
+    if not env_name or not isinstance(env_name, str):
+        return env_name
+    
+    # Comprehensive list of words/phrases to remove (sorted by length descending for better matching)
+    words_to_remove = [
+        'SPS CORE SERVICE', 'PARES CORE SERVICE', 'UIX CORE SERVICE', 'ROSTER AUTOMATION',
+        'MATCH SERVER', 'F5 Portal', 'PDT', 'BPD', 'PROVIDER360 PDS Services', 'PROVNEXUS Services', 'UIX', 'SPSProvRestore', 'SPSAuditHistory',
+        'NETWORKAI', 'APPVIEWX', 'PARESOld', 'SPSDARTUI', 'PEGA', 'PKM', 'OEM', 'Prov360Services'
+    ]
+    
+    cleaned_name = env_name
+    
+    # Remove category words using regex for better word boundary matching
+    for word in words_to_remove:
+        # Create pattern that matches the word with optional word boundaries
+        pattern = re.compile(re.escape(word), re.IGNORECASE)
+        cleaned_name = pattern.sub('', cleaned_name)
+    
+    # Clean up multiple spaces, tabs, and newlines
+    cleaned_name = re.sub(r'\s+', ' ', cleaned_name)
+    
+    # Remove leading/trailing spaces and common separators
+    cleaned_name = cleaned_name.strip(' -_.,;:')
+    
+    # Handle edge cases where cleaning results in empty or very short strings
+    if not cleaned_name or len(cleaned_name.strip()) < 2:
+        return env_name
+    
+    return cleaned_name
 
-    print("🚀 Auditing Application Java Process which are Currently Running...")
+def results_by_category(results):
+    """Group results by preferred category with proper within-category sorting"""
+    
+    # Group results by category
+    grouped_results = defaultdict(list)
+    for res in results:
+        category = get_category(res['Prod Env'])
+        grouped_results[category].append(res)
+    
+    # Updated category order to match the logical flow
+    category_order = [
+        'PEGA', 'SPS CORE SERVICES', 'PARES CORE SERVICES', 'UIX CORE SERVICE', 
+        'ROSTER AUTOMATION', 'SPSDARTUI', 'PKM', 'UIX', 'MATCH SERVER', 
+        'PROV360SERVICES', 'SPSPROVRESTORE', 'SPSAUDITHISTORY', 'PROVIDER360 PDS SERVICES', 'PROVNEXUS SERVICES', 
+        'PDT', 'BPD', 'F5 PORTAL', 'NETWORKAI', 'OEM', 'APPVIEWX', 'PARESOLD'
+    ]
 
-    all_results = []
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = [executor.submit(check_server, server, app.name) 
-                   for app in INVENTORY for server in app.servers]
+    # Define environment order within each category for consistent sorting
+    env_order_within_category = {
+        'PEGA': [
+            'PEGA SPS F5 Pool Status', 'PEGA SPS F5', 'PEGA SPS UTILITY F5 Pool Status', 'PEGA SPS UTILITY F5',
+            'PEGA PDMAPP F5 Pool Status', 'PEGA PDMAPP F5', 'PEGA Hazelcast', 'PEGA Stream Node', 'PEGA Search Node',
+            'PEGA BackgroundProcessing,<br>AgentRun3BGNodes', 'PEGA BackgroundProcessing,<br>AgentRun1BGNode',
+            'PEGA BackgroundProcessing,BIX,<br>AgentRun2BGNodes,AgentRun3BGNodes', 
+            'PEGA BackgroundProcessing,<br>AgentRun2BGNodes,AgentRun3BGNodes',
+            'PEGA PDM Node', 'PEGA WebUser Node'
+        ],
+        'SPS CORE SERVICES': [
+            'SPS Core Service F5 Pool Status', 'SPS Core Service F5', 'SPS Core Service Node URL'
+        ],
+        'PARES CORE SERVICES': [
+            'PARES Core Service F5 Pool Status', 'PARES Core Service F5 URL', 'PARES Core Service Node URL'
+        ],
+        'UIX CORE SERVICE': [
+            'UIX Core Service F5 Pool Status', 'UIX Core Service F5', 'UIX Core Service Node URL'
+        ],
+        'ROSTER AUTOMATION': [
+            'ROSTER AUTOMATION F5 Pool Status', 'ROSTER AUTOMATION F5', 'ROSTER AUTOMATION Node URL'
+        ],
+        'SPSDARTUI': [
+            'SPSDARTUI F5 Pool Status', 'SPSDARTUI F5'
+        ],
+        'PKM': [
+            'PKM F5 Pool Status', 'PKM Node URL'
+        ],
+        'UIX': [
+            'UIX F5 Pool Status', 'UIX F5', 'UIX Node URL'
+        ],
+        'MATCH SERVER': [
+            'MATCH SERVER Inspector URL', 'MATCH SERVER Console URL'
+        ],
+        'PROV360SERVICES': [
+            'Prov360Services F5 Pool Status'
+        ],
+        'SPSPROVRESTORE': [
+            'SPSProvRestore F5 Pool Status', 'SPSProvRestore F5'
+        ],
+        'SPSAUDITHISTORY': [
+            'SPSAuditHistory F5 Pool Status', 'SPSAuditHistory F5'
+        ],
+        'PROVIDER360 PDS SERVICES': [
+            'Provider360 PDS Services F5 Pool Status', 'Provider360 PDS Services F5', 'Provider360 PDS Services Node URL'
+        ],
+        'PROVNEXUS SERVICES': [
+            'ProvNexus Services F5 Pool Status'
+        ],
+        'PDT': ['PDT Node'],
+        'BPD': ['BPD Node'],
+        'F5 PORTAL': ['F5 Portal VIP'],
+        'NETWORKAI': ['NETWORKAI prov360 Dashboard'],
+        'OEM': ['OEM Console Login'],
+        'APPVIEWX': ['APPVIEWX Dashboard'],
+        'PARESOLD': ['PARESOld Node']
+    }
 
-        for future in as_completed(futures):
-            all_results.extend(future.result())
+    sorted_categories = sorted(grouped_results.keys(), key=lambda x: category_order.index(x) if x in category_order else len(category_order))
+    
+    # Return sorted results with within-category sorting
+    sorted_results = []
+    for category in sorted_categories:
+        category_results = grouped_results[category]
+        
+        # Sort within category using the defined order
+        if category in env_order_within_category:
+            env_order = env_order_within_category[category]
+            category_results.sort(key=lambda x: env_order.index(x['Prod Env']) if x['Prod Env'] in env_order else len(env_order))
+        
+        sorted_results.extend(category_results)
+    
+    return sorted_results
 
-    if all_results:
-        df_final = pd.DataFrame(all_results)
-        app_order = {app.name: i for i, app in enumerate(INVENTORY)}
-        df_final['app_order'] = df_final['Application'].map(app_order).fillna(999)
-        df_final = df_final.sort_values(by=['app_order', 'Server']).reset_index(drop=True)
-        df_final = df_final.drop(columns=['app_order'])
+# ================== SEND EMAIL ==================
+def send_outlook_mail(results, screenshot_paths=None, total_urls=0, up_count=0, duration_str="", end_et=None):
+    """Drafts the formatted results via Outlook Desktop App with optional screenshots"""
+    print("\n")
+    print("Drafting Outlook email")
+    now = datetime.now()
+    hour = now.hour
+    shift = "S1" if 6 <= hour < 15 else "S2" if 15 <= hour < 23 else "S3"
+    date_today = now.strftime("%d %B %Y")
 
-        cols = ["Application", "Server", "Process Type", "Path", "Java Version", "Runtime", "Vendor", "Vendor Name"]
-        df_final = df_final[cols]
+    down_count = total_urls - up_count
+    success_rate = round((up_count / total_urls) * 100, 2) if total_urls > 0 else 0
 
-        # Save to Excel with Summary
-        with pd.ExcelWriter(EXCEL_REPORT_NAME, engine='xlsxwriter') as writer:
-            df_final.to_excel(writer, sheet_name='Detailed_Report', index=False)
+    outlook = win32.Dispatch('outlook.application')
+    mail = outlook.CreateItem(0)
+    #mail.To = 'Venkatesh.Sure@carelon.com' # Update with actual recipient
+    #mail.CC = 'Mahesh.Gn@carelon.com'
+    mail.To = 'dl-T-SPS-Infrastructure-offshore <dl-T-SPS-Infrastructure-offshore@legato.com>' 
+    mail.CC = 'Ande, Sreedevi <sreedevi.ande@elevancehealth.com>; Singh, Sushant <Sushant.Singh@carelon.com>';
+    mail.Subject = f'[SPS Monitoring Report] - PROD Environment: Post-Release Health Check Report (URLs & F5 Pool Status Artifacts)- {shift} - {date_today}' 
+    # Group results by category for merged rows
+    from collections import defaultdict
+    grouped_results = defaultdict(list)
+    for res in results:
+        category = get_category(res['Prod Env'])
+        grouped_results[category].append(res)
+    
+    # Sort categories to maintain consistent order
+    category_order = [
+        'PEGA', 'SPS CORE SERVICES', 'PARES CORE SERVICES', 'UIX CORE SERVICE', 'ROSTER AUTOMATION', 'SPSDARTUI', 'PKM', 'UIX', 'MATCH SERVER', 'PROV360SERVICES', 'SPSPROVRESTORE', 'SPSAUDITHISTORY', 'PROVIDER360 PDS SERVICES', 'PROVNEXUS SERVICES', 'PDT', 'BPD', 'F5 PORTAL', 'NETWORKAI', 'OEM', 'APPVIEWX', 'PARESOLD'
+    ]
+
+    sorted_categories = sorted(grouped_results.keys(), key=lambda x: category_order.index(x) if x in category_order else len(category_order))
+    
+    # Building the HTML Table for the email body with merged category cells
+    table_rows = ""
+    for category in sorted_categories:
+        category_results = grouped_results[category]
+        for i, res in enumerate(category_results):
+            color = "green" if res['URLStatus'] == "UP and Running" else "red"
             
-            summary = get_audited_summary(all_results)
-            summary_df = pd.DataFrame(list(summary.items()), columns=['Metric', 'Count'])
-            summary_df.to_excel(writer, sheet_name='Summary', index=False)
+            # Clean the environment name by removing category words
+            clean_env = clean_env_name(res['Prod Env'])
+            
+            if i == 0:  # First row of this category - include category cell with rowspan
+                rowspan = len(category_results)
+                table_rows += f"""
+        <tr>
+            <td style="border:1px solid #ddd; padding:8px; font-weight:bold; background-color:#f8f9fa; text-align:center; vertical-align:middle;" rowspan="{rowspan}">{category}</td>
+            <td style="border:1px solid #ddd; padding:8px;">{clean_env}</td>
+            <td style="border:1px solid #ddd; padding:8px;">{res['F5 and Node URLs']}</td>
+            <td style="border:1px solid #ddd; padding:8px; text-align:center;">{res['StatusCode']}</td>
+            <td style="border:1px solid #ddd; padding:8px; color:{color}; font-weight:bold;">{res['URLStatus']}</td>
+        </tr>"""
+            else:  # Subsequent rows of this category - no category cell
+                table_rows += f"""
+        <tr>
+            <td style="border:1px solid #ddd; padding:8px;">{clean_env}</td>
+            <td style="border:1px solid #ddd; padding:8px;">{res['F5 and Node URLs']}</td>
+            <td style="border:1px solid #ddd; padding:8px; text-align:center;">{res['StatusCode']}</td>
+            <td style="border:1px solid #ddd; padding:8px; color:{color}; font-weight:bold;">{res['URLStatus']}</td>
+        </tr>"""
+    
+    # Add screenshot attachments if provided
+    screenshot_info = ""
+    if screenshot_paths:
+        screenshot_info = f"<p><strong>JFYI...</strong> Attached {len(screenshot_paths)} F5 Pool Status Screenshots to know current pool status.</p>"
+        for file_path in screenshot_paths:
+            if os.path.exists(file_path):
+                mail.Attachments.Add(file_path)
+                print(f"Attached screenshot: {os.path.basename(file_path)}")
 
-        print(f"💾 Report saved: {EXCEL_REPORT_NAME}")
+    mail.HTMLBody = f"""
+    <html>
+    <body>
+            <p>Hi Team,</p>
+            <p>Please find the below Production URL's Health Check report.</p>
+            {screenshot_info}
+	    <p>All Prod Env URL's Checking Started at <i>{start_et.strftime(fmt)}</i></p>         
+    <table style="border-collapse: collapse; width: 100%; font-family: Arial, sans-serif;">
+        <!-- SUMMARY ROW -->
+        <tr style="background-color: #e6f7e6; font-weight: bold;">
+            <td style="border:1px solid #ddd; padding:8px; text-align:center;" colspan="1"><strong>SUMMARY</strong></td>
+            <td style="border:1px solid #ddd; padding:8px; text-align:center;">Total URLs: <strong>{total_urls}</strong></td>
+            <td style="border:1px solid #ddd; padding:8px; text-align:center; color:green;">UP: <strong>{up_count}</strong></td>
+            <td style="border:1px solid #ddd; padding:8px; text-align:center; color:red;">DOWN / Failed: <strong>{down_count}</strong><br></td>
+            <td style="border:1px solid #ddd; padding:8px; text-align:center; color:green;">Success Rate: <strong>{success_rate}%</strong></td>             
+        </tr>
+        <tr style="background-color: #f2f2f2;">
+            <th style="border:1px solid #ddd; padding:8px; text-align:center; width: 7.5%; white-space: normal;">Env Type</th>
+            <th style="border:1px solid #ddd; padding:8px; text-align:center; width: 165px; white-space: normal;">F5 and Node URL Names</th>
+            <th style="border:1px solid #ddd; padding:8px; text-align:left; width: 275px; white-space: normal;">F5 and Node URLs</th>
+            <th style="border:1px solid #ddd; padding:8px; text-align:center; width: 85px; white-space: normal;">Status Code</th>
+            <th style="border:1px solid #ddd; padding:8px; text-align:center; width: 150px; overflow: hidden; text-overflow: ellipsis;">URL Status</th>
+        </tr>
+        {table_rows}
+    </table>
+    <p>
+       All Prod Env URL's Checking Finished at <i>{end_et.strftime(fmt)}</i><br>
+       All Prod Env URL's Status Health Check Verified within <i>{duration_str}</i>
+    </p>
+    <p><i>This is an automated report.</i></p>
+    <p>Regards,<br>Venkatesh Sure</p>
+    """
+    mail.Display() # Opens the window so we can see it immediately
+    print("✅ Email Drafted and Saved to Outlook Drafts Successfully.")
 
-        # End time
-        end_ist = datetime.now(IST).replace(microsecond=0)
-        end_et = end_ist.astimezone(ET)
-        duration = end_ist - start_ist
-        hours, rem = divmod(int(duration.total_seconds()), 3600)
-        minutes, seconds = divmod(rem, 60)
-        duration_str = f"{hours}h {minutes}m {seconds}s"
+# ================== MAIN EXECUTION ==================
+# Categorized URLs
+environments_moretimout = {
+    "PEGA PDMAPP F5": [
+        "https://pdmapp.elevancehealth.com/prweb/"
+    ],
+    "PARES Core Service F5 URL": [
+        "https://paresspsservices.anthem.com/spsservices"
+    ],
+}
 
-        draft_email(all_results, EXCEL_REPORT_NAME, summary)
-    else:
-        print("⚠ No data collected.")
+environments = {
+    "PEGA SPS F5 Pool Status": [
+        "https://sps.elevancehealth.com/?f5poolstatus"
+    ],
+    "PEGA SPS F5": [
+        "https://sps.elevancehealth.com/prweb/",
+    ],
+    "PEGA SPS UTILITY F5 Pool Status": [
+        "https://spspegautility.elevancehealth.com/prweb/?f5poolstatus"
+    ],
+    "PEGA SPS UTILITY F5": [
+        "https://spspegautility.elevancehealth.com/prweb/"
+    ],
+    "PEGA PDMAPP F5 Pool Status": [
+        "https://pdmapp.elevancehealth.com/prweb/?f5poolstatus"
+    ],
+    "PEGA Hazelcast": [
+        "https://va10plvpeg516.wellpoint.com:8443/prcluster_service/ClusterServiceHealthCheck",
+        "https://va10plvpeg517.wellpoint.com:8443/prcluster_service/ClusterServiceHealthCheck",
+        "https://va10plvpeg518.wellpoint.com:8443/prcluster_service/ClusterServiceHealthCheck"
+    ],
+    "PEGA Stream Node": [
+        "https://dc04plvpeg391.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04plvpeg393.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "PEGA Search Node": [
+        "https://dc04plvpeg391.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04plvpeg392.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "PEGA BackgroundProcessing,<br>AgentRun3BGNodes": [
+        "https://dc04plvpeg393.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "PEGA BackgroundProcessing,<br>AgentRun1BGNode": [
+        "https://dc04plvpeg392.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "PEGA BackgroundProcessing,BIX,<br>AgentRun2BGNodes,AgentRun3BGNodes": [
+        "https://dc04plvpeg394.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "PEGA BackgroundProcessing,<br>AgentRun2BGNodes,AgentRun3BGNodes": [
+        "https://dc04plvpeg394.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "PEGA PDM Node": [
+        "https://dc04plvpeg396.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04plvpeg396.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04plvpeg397.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04plvpeg397.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04plvpeg398.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04plvpeg398.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04plvpeg399.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04plvpeg399.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04plvpeg395.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04plvpeg395.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "PEGA WebUser Node": [
+        "https://dc04plvpeg400.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04plvpeg400.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04plvpeg401.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04plvpeg401.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04plvpeg402.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04plvpeg402.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04plvpeg403.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04plvpeg403.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04plvpeg404.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04plvpeg404.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04plvpeg405.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04plvpeg405.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "SPS Core Service F5 Pool Status": [
+        "https://spsservices.anthem.com/?f5poolstatus"
+    ],
+    "SPS Core Service F5": [
+        "https://spsservices.anthem.com/spsservices"
+    ],
+    "SPS Core Service Node URL": [
+        "https://va10plvwbs628.wellpoint.com:25694/spsservices",
+        "https://va10plvwbs629.wellpoint.com:25694/spsservices",
+        "https://va10plvwbs629.wellpoint.com:25695/spsservices",
+        "https://va10plvwbs630.wellpoint.com:25694/spsservices",
+        "https://va10plvwbs630.wellpoint.com:25695/spsservices",
+        "https://va10plvwbs744.wellpoint.com:25694/spsservices",
+        "https://va10plvwbs744.wellpoint.com:25695/spsservices",
+        "https://va10plvwbs744.wellpoint.com:25696/spsservices",
+        "https://va10plvwbs745.wellpoint.com:25694/spsservices",
+        "https://va10plvwbs745.wellpoint.com:25695/spsservices",
+        "https://va10plvwbs745.wellpoint.com:25696/spsservices",
+        "https://va10plvwbs746.wellpoint.com:25694/spsservices",
+        "https://va10plvwbs747.wellpoint.com:25694/spsservices",
+        "https://va10plvwbs747.wellpoint.com:25695/spsservices",
+        "https://va10plvwbs747.wellpoint.com:25696/spsservices",
+        "https://va10plvwbs748.wellpoint.com:25694/spsservices",
+        "https://va10plvwbs748.wellpoint.com:25695/spsservices",
+        "https://va10plvwbs748.wellpoint.com:25696/spsservices",
+        "https://va10plvwbs749.wellpoint.com:25694/spsservices",
+        "https://va10plvwbs749.wellpoint.com:25695/spsservices",
+        "https://va10plvwbs749.wellpoint.com:25696/spsservices",
+        "https://va10plvwbs750.wellpoint.com:25694/spsservices",
+        "https://va10plvwbs750.wellpoint.com:25695/spsservices",
+        "https://va10plvwbs750.wellpoint.com:25696/spsservices",
+        "https://va10plvwbs751.wellpoint.com:25694/spsservices",
+        "https://va10plvwbs751.wellpoint.com:25695/spsservices",
+        "https://va10plvwbs751.wellpoint.com:25696/spsservices",
+        "https://va10plvwbs752.wellpoint.com:25694/spsservices",
+        "https://va10plvwbs752.wellpoint.com:25695/spsservices",
+        "https://va10plvwbs752.wellpoint.com:25696/spsservices"
+    ],
+    "PARES Core Service F5 Pool Status": [
+        "https://paresspsservices.anthem.com/?f5poolstatus"
+    ],
+    "PARES Core Service Node URL": [
+        "https://va10plvwbs628.wellpoint.com:25695/spsservices",
+        "https://va10plvwbs628.wellpoint.com:25696/spsservices",
+        "https://va10plvwbs746.wellpoint.com:25695/spsservices",
+        "https://va10plvwbs746.wellpoint.com:25696/spsservices"
+    ],
+    "UIX Core Service F5 Pool Status": [
+        "https://spsuixservices.anthem.com/?f5poolstatus"
+    ],
+    "UIX Core Service F5": [
+        "https://spsuixservices.anthem.com/spsservices"
+    ],
+    "UIX Core Service Node URL": [
+        "https://va10plvwbs629.wellpoint.com:25696/spsservices",
+        "https://va10plvwbs630.wellpoint.com:25696/spsservices"
+    ],
+    "ROSTER AUTOMATION F5 Pool Status": [
+        "https://providerrma.elevancehealth.com/?f5poolstatus"
+    ],
+    "ROSTER AUTOMATION F5": [
+        "https://providerrma.elevancehealth.com/app/dashboard"
+    ],
+    "ROSTER AUTOMATION Node URL": [
+        "https://dc04plvsps300.wellpoint.com:8998/app/dashboard",
+        "https://dc04plvsps301.wellpoint.com:8998/app/dashboard"
+    ],
+    "SPSDARTUI F5 Pool Status": [
+        "https://spsdartui.anthem.com/?f5poolstatus"
+    ],
+    "SPSDARTUI F5": [
+        "https://spsdartui.anthem.com/"
+    ],
+    "PKM F5 Pool Status": [
+        "https://pdm-pkm.anthem.com/?f5poolstatus"
+    ],
+    "PKM Node URL": [
+        "https://dc04plvwbs371.wellpoint.com:25694/translationAdapter/testMe",
+        "https://dc04plvwbs371.wellpoint.com:25695/translationAdapter/testMe",
+        "https://dc04plvwbs371.wellpoint.com:25696/translationAdapter/testMe",
+        "https://dc04plvwbs372.wellpoint.com:25694/translationAdapter/testMe",
+        "https://dc04plvwbs372.wellpoint.com:25695/translationAdapter/testMe",
+        "https://dc04plvwbs372.wellpoint.com:25696/translationAdapter/testMe",
+        "https://dc04plvwbs373.wellpoint.com:25694/translationAdapter/testMe",
+        "https://dc04plvwbs373.wellpoint.com:25695/translationAdapter/testMe",
+        "https://dc04plvwbs373.wellpoint.com:25696/translationAdapter/testMe",
+        "https://dc04plvwbs374.wellpoint.com:25694/translationAdapter/testMe",
+        "https://dc04plvwbs374.wellpoint.com:25695/translationAdapter/testMe",
+        "https://dc04plvwbs374.wellpoint.com:25696/translationAdapter/testMe"
+    ],
+    "UIX F5 Pool Status": [
+        "https://pdm-uix.anthem.com/?f5poolstatus"
+    ],
+    "UIX F5": [
+        "https://pdm-uix.anthem.com/",
+    ],
+    "UIX Node URL": [
+        "https://dc04plvwbs321.wellpoint.com:9543/",
+        "https://dc04plvwbs321.wellpoint.com:9444/",
+        "https://dc04plvwbs322.wellpoint.com:9543/",
+        "https://dc04plvwbs322.wellpoint.com:9444/"
+    ],
+    "MATCH SERVER Inspector URL": [
+        "https://va10plvwbs687.wellpoint.com:10047/inspector/common/login.ihtml",
+        "https://va10plvwbs688.wellpoint.com:10047/inspector/common/login.ihtml"
+    ],
+    "MATCH SERVER Console URL": [
+        "https://va10plvwbs687.wellpoint.com:10002/ibm/console/logon.jsp",
+        "https://va10plvwbs688.wellpoint.com:10002/ibm/console/logon.jsp"
+    ],
+    "Prov360Services F5 Pool Status": [
+        "https://services.provnexus.elevancehealth.com/?f5poolstatus"
+    ],
+    "SPSProvRestore F5 Pool Status": [
+        "https://spsrestore.elevancehealth.com/?f5poolstatus"
+    ],
+    "SPSProvRestore F5": [
+        "https://spsrestore.elevancehealth.com/"
+    ],
+    "SPSAuditHistory F5 Pool Status": [
+        "https://spsaudithistory.elevancehealth.com/?f5poolstatus"
+    ],
+    "SPSAuditHistory F5": [
+        "https://spsaudithistory.elevancehealth.com/"
+    ],
+    "Provider360 PDS Services F5 Pool Status": [
+        "https://provider360.anthem.com/pdsservices/?f5poolstatus"
+    ],
+    "Provider360 PDS Services F5": [
+        "https://provider360.anthem.com/pdsservices/"
+    ],
+    "Provider360 PDS Services Node URL": [
+        "https://va10plvwbs669.wellpoint.com:10017/pdsservices",
+        "https://va10plvwbs669.wellpoint.com:10018/pdsservices",
+    ],
+    "ProvNexus Services F5 Pool Status": [
+        "https://provnexus.prod.elevancehealth.com/?f5poolstatus"
+    ],
+    "PDT Node": [
+        "http://dc04plvcfe305:8070/pdt_fhir_nexus/appHealthCheck",
+        "http://dc04plvcfe305:8071/pdt_fhir_nexus/appHealthCheck",
+        "http://dc04plvcfe305:8072/pdt_fhir_nexus/appHealthCheck",
+        "http://dc04plvcfe305:8073/pdt_fhir_nexus/appHealthCheck",
+        "http://dc04plvcfe305:8074/pdt_fhir_nexus/appHealthCheck",
+        "http://dc04plvcfe305:8075/pdt_fhir_nexus/appHealthCheck",
+        "http://dc04plvcfe305:8076/pdt_fhir_nexus/appHealthCheck",
+        "http://dc04plvcfe305:8077/pdt_fhir_nexus/appHealthCheck",
+        "http://dc04plvcfe305:8078/pdt_fhir_nexus/appHealthCheck",
+        "http://dc04plvcfe305:8078/pdt_fhir_nexus/dashboard",
+        "http://dc04plvcfe305:8070/pdt_fhir_nexus/dashboard?Etl_load_ids=2299,2296"
+    ],
+    "BPD Node": [
+        "http://dc04plvcfe306.wellpoint.com:45699/bdd/config/findAll",
+        "http://dc04plvcfe306.wellpoint.com:45698/bdd/config/findAll",
+        "http://dc04plvcfe306.wellpoint.com:45697/bdd/config/findAll",
+        "http://dc04plvcfe306.wellpoint.com:35699/bdd/config/findAll",
+        "http://dc04plvcfe306.wellpoint.com:35696/bdd/config/findAll",
+        "http://dc04plvcfe306.wellpoint.com:35697/bdd/config/findAll",
+        "http://dc04plvcfe306.wellpoint.com:25699/bdd/config/findAll",
+        "http://dc04plvcfe306.wellpoint.com:25698/bdd/config/findAll",
+        "http://dc04plvcfe306.wellpoint.com:25697/bdd/config/findAll" 
+    ],
+    "F5 Portal VIP": [
+        "https://f5portal.internal.das/vips"
+    ],
+    "NETWORKAI prov360 Dashboard": [
+        "https://netai.prov360prod.awsdns.internal.das/dashboard/"
+    ],
+    "OEM Console Login": [
+        "https://oem.elevancehealth.com/em/faces/logon/core-uifwk-console-login"
+    ],
+    "APPVIEWX Dashboard": [
+        "https://elevancehealth.appvx.com/appviewx/app#dashboard/"
+    ],
+    "PARESOld Node": [
+        "https://va10plvwbs669.wellpoint.com:10012/parespsservices",
+        "https://va10plvwbs669.wellpoint.com:10012/spsservices",
+        "https://va10plvwbs669.wellpoint.com:10013/parespsservices",
+        "https://va10plvwbs669.wellpoint.com:10013/spsservices",
+        "https://va10plvwbs669.wellpoint.com:10014/parespsservices",
+        "https://va10plvwbs669.wellpoint.com:10014/spsservices",
+        "https://va10plvwbs669.wellpoint.com:10015/parespsservices",
+        "https://va10plvwbs669.wellpoint.com:10015/spsservices",
+        "https://va10plvwbs669.wellpoint.com:10016/parespsservices",
+        "https://va10plvwbs669.wellpoint.com:10016/spsservices"
+    ],
+}
 
-    print(f"\n🏁 SPS Non-Prod Env Application Running Java Process Auditing Finished at: {end_ist.strftime(fmt)}/{end_et.strftime(fmt)}")
-    print(f"\n⏱️ SPS Non-Prod Env Application Running Java Process Auditing Duration: {duration_str}")
+# 1. Merge dictionaries safely (Python 3.9+)
+# This combines both into one master list for the loop
+# Run validation and collect results
+all_envs = environments_moretimout | environments
+tasks = []
+
+for env_name, url_list in all_envs.items():
+    for url in url_list:
+        timeout_val = 950 if url in environments_moretimout.get(env_name, []) else 10
+        tasks.append((env_name, url, timeout_val))
+print(f"🚀 Checking {len(tasks)} URLs in parallel...")
+
+# 2. Worker function for the thread
+def check_url(task):
+    env_name, url, timeout_val = task
+    code, status = get_status(url, timeout_val)
+    return {
+        'Prod Env': env_name, 
+        'F5 and Node URLs': url, 
+        'StatusCode': code, 
+        'URLStatus': status
+    }
+
+# 3. Run Parallel Checks
+# Use ThreadPoolExecutor for I/O-bound URL checking and to Execute in parallel with RETRIEVE in order
+with ThreadPoolExecutor(max_workers=25) as executor:
+    # executor.map preserves the order of the input 'tasks'
+    unordered_results = list(executor.map(check_url, tasks))
+
+# ================== SCREENSHOTS & TIMING ==================
+# Capture Screenshots of F5 Pool Status URLs
+print("\n📸 Capturing F5 Pool Status screenshots...")
+screenshot_paths = asyncio.run(monitor_all(MONITOR_LIST))
+
+if screenshot_paths:
+    print(f"✅ Successfully captured {len(screenshot_paths)} screenshots")
+else:
+    print("⚠️ No screenshots were captured")
+
+# 2. End Time (No Microseconds) & Duration Calculation in Hours, Minutes, and Seconds
+end_ist = datetime.now(IST).replace(microsecond=0)
+end_et = end_ist.astimezone(ET)
+duration = end_ist - start_ist
+total_seconds = int(duration.total_seconds())
+# Breaking down total seconds
+hours, remainder = divmod(total_seconds, 3600)
+minutes, seconds = divmod(remainder, 60)
+print(f"\n🏁 All Prod Env URL's Checking Finished at: {end_ist.strftime(fmt)}/{end_et.strftime(fmt)}")
+duration_str = f"{hours}h {minutes}m {seconds}s"
+
+total_urls = len(tasks)
+up_count = sum(1 for r in unordered_results if "UP and Running" in str(r['URLStatus']) or "JVM UP" in str(r['URLStatus']))
+
+print(f"\n⏱️ All Prod Env URL's Status Health Check Verification Duration: {duration_str}")
+print(f"📊 Summary: {up_count}/{total_urls} UP ({round((up_count/total_urls)*100, 2)}%)\n")
+
+# Sort results by category order with proper within-category sorting
+all_results = results_by_category(unordered_results)
+
+# Send the email with both status results and screenshots
+send_outlook_mail(all_results, screenshot_paths, total_urls=total_urls, up_count=up_count, duration_str=duration_str, end_et=end_et)
