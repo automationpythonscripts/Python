@@ -1,1 +1,1190 @@
+import requests
+import urllib3
+import time
+import re
+import win32com.client as win32
+from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
+from collections import defaultdict
+import asyncio
+import os
+from playwright.async_api import async_playwright
+import pandas as pd
+from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.utils import get_column_letter
 
+# Suppress insecure request warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+#Dependencies for Capturing ScreenShot
+#pip install playwright
+#playwright install chromium
+#Dependencies for Generating Excel
+#pip install openpyxl
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    import pytz as ZoneInfo # Fallback for older versions
+
+# ================== CONFIGURATION: Set Time Zones ==================
+IST = ZoneInfo("Asia/Kolkata")
+ET = ZoneInfo("America/New_York")
+fmt = "%Y-%m-%d %I:%M:%S %p %Z"
+# Start Time (No Microseconds)
+start_ist = datetime.now(IST).replace(microsecond=0)
+start_et = start_ist.astimezone(ET)
+
+print(f"\n🚀 All SPS Non-Prod Pega Env URL's Checking started at {start_ist.strftime(fmt)}/{start_et.strftime(fmt)}")
+print("Checking URL's Status, Please Wait...\n")
+
+# ================== MONITOR LIST FOR SCREENSHOTS ==================
+# Screenshot monitoring list for F5 pool status URLs
+MONITOR_LIST = [
+    {"url": "https://sps.upgradedev1.elevancehealth.com/prweb/PRAuth/?f5poolstatus", "name": "PEGA DEV1 WebUser Nodes F5 Pool Status"},
+    {"url": "https://sps.upgradedev2.elevancehealth.com/prweb/PRAuth/?f5poolstatus", "name": "PEGA DEV2 WebUser Nodes F5 Pool Status"},
+    {"url": "https://sps.upgradedev3.elevancehealth.com/prweb/PRAuth/?f5poolstatus", "name": "PEGA DEV3 WebUser Nodes F5 Pool Status"},
+    {"url": "https://sps.upgradedev4.elevancehealth.com/prweb/PRAuth/?f5poolstatus", "name": "PEGA DEV4 WebUser Nodes F5 Pool Status"},
+    {"url": "https://sps.upgradedev5.elevancehealth.com/prweb/PRAuth/?f5poolstatus", "name": "PEGA DEV5 WebUser Nodes F5 Pool Status"},
+    {"url": "https://sps.upgradedev6.elevancehealth.com/prweb/PRAuth/?f5poolstatus", "name": "PEGA DEV6 WebUser Nodes F5 Pool Status"},
+    {"url": "https://sps.upgradedev7.elevancehealth.com/prweb/PRAuth/?f5poolstatus", "name": "PEGA DEV7 WebUser Nodes F5 Pool Status"},
+    {"url": "https://sps.pegaupgradesbx1.elevancehealth.com/prweb/PRAuth/?f5poolstatus", "name": "PEGA SBX1 F5 Pool Status"},
+    {"url": "https://sps.pegaupgradesbx2.elevancehealth.com/prweb/PRAuth/?f5poolstatus", "name": "PEGA SBX2 F5 Pool Status"},
+    {"url": "https://sps.pegaupgradesbx3.elevancehealth.com/prweb/PRAuth/?f5poolstatus", "name": "PEGA SBX3 F5 Pool Status"},
+    {"url": "https://sps.pegaupgradesbx4.elevancehealth.com/prweb/PRAuth/?f5poolstatus", "name": "PEGA SBX4 F5 Pool Status"},
+    {"url": "https://sps.pegaupgradesbx5.elevancehealth.com/prweb/PRAuth/?f5poolstatus", "name": "PEGA SBX5 F5 Pool Status"},
+    {"url": "https://sps.pegaupgradesbx6.elevancehealth.com/prweb/PRAuth/?f5poolstatus", "name": "PEGA SBX6 F5 Pool Status"},
+    {"url": "https://sps.pegaupgradesbx7.elevancehealth.com/prweb/PRAuth/?f5poolstatus", "name": "PEGA SBX7 F5 Pool Status"},
+    {"url": "https://sps.upgradesit1.elevancehealth.com/prweb/PRAuth/?f5poolstatus", "name": "PEGA SIT1 WebUser Nodes F5 Pool Status"},
+    {"url": "https://sps.upgradesit2.elevancehealth.com/prweb/PRAuth/?f5poolstatus", "name": "PEGA SIT2 WebUser Nodes F5 Pool Status"},
+    {"url": "https://sps.upgradesit3.elevancehealth.com/prweb/PRAuth/?f5poolstatus", "name": "PEGA SIT3 WebUser Nodes F5 Pool Status"},
+    {"url": "https://sps.upgradesit4.elevancehealth.com/prweb/PRAuth/?f5poolstatus", "name": "PEGA SIT4 WebUser Nodes F5 Pool Status"},
+    {"url": "https://sps.upgradesit5.elevancehealth.com/prweb/PRAuth/?f5poolstatus", "name": "PEGA SIT5 WebUser Nodes F5 Pool Status"},
+    {"url": "https://sps.upgradesit6.elevancehealth.com/prweb/PRAuth/?f5poolstatus", "name": "PEGA SIT6 WebUser Nodes F5 Pool Status"},
+    {"url": "https://sps.upgradesit7.elevancehealth.com/prweb/PRAuth/?f5poolstatus", "name": "PEGA SIT7 WebUser Nodes F5 Pool Status"},
+    {"url": "https://sps.upgradeuat1.elevancehealth.com/prweb/PRAuth/?f5poolstatus", "name": "PEGA UAT1 WebUser Nodes F5 Pool Status"},
+    {"url": "https://sps.upgradeuat2.elevancehealth.com/prweb/PRAuth/?f5poolstatus", "name": "PEGA UAT2 WebUser Nodes F5 Pool Status"},
+    {"url": "https://sps.upgradeuat3.elevancehealth.com/prweb/PRAuth/?f5poolstatus", "name": "PEGA UAT3 WebUser Nodes F5 Pool Status"},
+    {"url": "https://sps.upgradeuat4.elevancehealth.com/prweb/PRAuth/?f5poolstatus", "name": "PEGA UAT4 WebUser Nodes F5 Pool Status"},
+    {"url": "https://sps.upgradeuat5.elevancehealth.com/prweb/PRAuth/?f5poolstatus", "name": "PEGA UAT5 WebUser Nodes F5 Pool Status"},
+    {"url": "https://sps.upgradeuat6.elevancehealth.com/prweb/PRAuth/?f5poolstatus", "name": "PEGA UAT6 WebUser Nodes F5 Pool Status"},
+    {"url": "https://sps.upgradeuat7.elevancehealth.com/prweb/PRAuth/?f5poolstatus", "name": "PEGA UAT7 WebUser Nodes F5 Pool Status"},
+    {"url": "https://sps.perf88.elevancehealth.com/prweb/PRAuth/?f5poolstatus", "name": "PEGA PERF1 SPS F5 Pool Status"},
+    {"url": "https://spspegautility.perf88.elevancehealth.com/prweb/PRAuth/?f5poolstatus", "name": "PEGA PERF1 PEGAUTILTY F5 Pool Status"},
+    {"url": "https://pdmapp.perf88.elevancehealth.com/prweb/PRAuth/?f5poolstatus", "name": "PEGA PERF1 PDMAPP F5 Pool Status"},
+    {"url": "https://sps.perf288.elevancehealth.com/prweb/PRAuth/?f5poolstatus", "name": "PEGA PERF2 SPS F5 Pool Status"},
+    {"url": "https://spspegautility.perf288.elevancehealth.com/prweb/PRAuth/?f5poolstatus", "name": "PEGA PERF2 PEGAUTILTY F5 Pool Status"},
+    {"url": "https://pdmapp.perf288.elevancehealth.com/prweb/PRAuth/?f5poolstatus", "name": "PEGA PERF2 PDMAPP F5 Pool Status"}
+]
+
+# ================== ASYNC SCREENSHOT FUNCTION ==================
+async def capture_screenshot(browser, url, name, output_dir="screenshots"):
+    """Captures a single screenshot with isolated browser context."""
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    # Create a new context for better isolation
+    context = await browser.new_context(
+        viewport={'width': 1200, 'height': 920},
+        ignore_https_errors=True,
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    )
+    
+    page = await context.new_page()
+    output_path = os.path.abspath(os.path.join(output_dir, f"{name}.png"))
+    
+    try:
+        print(f"Capturing screenshot: {url}")
+        await page.goto(url, wait_until="networkidle", timeout=60000)
+        await page.screenshot(path=output_path, full_page=True)
+        return output_path
+    except Exception as e:
+        print(f"Error capturing {url}: {e}")
+        return None
+    finally:
+        await context.close()  # Close the entire context, not just the page
+
+async def monitor_all(data_list):
+    """Orchestrates concurrent screenshot captures."""
+    async with async_playwright() as p:
+        browser = await p.chromium.launch()
+        tasks = [capture_screenshot(browser, item['url'], item['name']) for item in data_list]
+        file_paths = await asyncio.gather(*tasks)
+        await browser.close()
+        return [f for f in file_paths if f]
+
+# ================== URL STATUS CHECK ==================
+def get_status(url, custom_timeout=10):
+    """
+    Checks URL status mimicking Microsoft Edge InPrivate mode.
+    """
+    url = url.strip()
+    
+    # Default Headers
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 Edg/122.0.0.0",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache"
+    }
+
+    try:
+        # Use a fresh session with no cookies to simulate Incognito
+        session = requests.Session()
+        session.cookies.clear() 
+
+        # No-verify and fresh session mimics InPrivate behavior
+        with requests.Session() as session:
+            response = session.get(
+                url, 
+                headers=headers, 
+                timeout=custom_timeout, 
+                allow_redirects=True, 
+                verify=False
+            )
+            status_code = response.status_code
+            style_base = "font-weight: bold; text-align: center;"
+
+            if status_code == 200:
+                status_msg = f'<div style="color: green; {style_base}">UP and Running</div>'
+            
+            elif status_code == 404:
+                if any(x in url.upper() for x in ["WELLPOINT", "DC04", "VA10"]):
+                    status_msg = (
+                        '<div style="color: green; font-weight: bold; text-align:center;">JVM UP</div>'
+                        '<div style="color: red; font-weight: bold; text-align:center;">'
+                        'but URL was DOWN<br>Context Root Not Found'
+                        '</div>'
+                    )
+                else:
+                    status_msg = (
+                        '<div style="color: red; font-weight: bold; text-align:center;">'
+                        'URL was DOWN<br>Context Root Not Found'
+                        '</div>'
+                    )
+            
+            elif status_code in [500, 403, 503]:
+                status_msg = (
+                    f'<div style="color: red; {style_base}">'
+                    f'DOWN ({status_code})<br>Service Unavailable'
+                    f'</div>'
+                )           
+            
+            else:
+                status_msg = f'<div style="color: orange; {style_base}">Status: {status_code}</div>'
+            
+            return status_code, status_msg
+
+    except requests.exceptions.ConnectionError:
+        return "FAILED", '<div style="text-align: center;">This site can’t be reached<br>URL Refused to connect</div>'
+    except requests.exceptions.Timeout:
+        return "TIMEOUT", '<div style="text-align: center;">Server Timeout</div>'
+    except Exception as e:
+        return "ERROR", str(e)
+
+# ================== CATEGORY & CLEANING FUNCTIONS ==================
+def get_category(env_name):
+    """Categorize environment names into predefined categories with comprehensive keyword mapping"""
+    if not env_name or not isinstance(env_name, str):
+        return 'OTHER'
+    
+    env_upper = env_name.upper().strip()
+    
+    # Define comprehensive category mappings with merged common words
+    category_keywords = {
+        'NON-PROD PEGA DEV1': ['NON-PROD PEGA DEV1'],
+        'NON-PROD PEGA DEV2': ['NON-PROD PEGA DEV2'],
+        'NON-PROD PEGA DEV3': ['NON-PROD PEGA DEV3'],
+        'NON-PROD PEGA DEV4': ['NON-PROD PEGA DEV4'],
+        'NON-PROD PEGA DEV5': ['NON-PROD PEGA DEV5'],
+        'NON-PROD PEGA DEV6': ['NON-PROD PEGA DEV6'],
+        'NON-PROD PEGA DEV7': ['NON-PROD PEGA DEV7'],
+        'NON-PROD PEGA SBX1': ['NON-PROD PEGA SBX1'],
+        'NON-PROD PEGA SBX2': ['NON-PROD PEGA SBX2'],
+        'NON-PROD PEGA SBX3': ['NON-PROD PEGA SBX3'],
+        'NON-PROD PEGA SBX4': ['NON-PROD PEGA SBX4'],
+        'NON-PROD PEGA SBX5': ['NON-PROD PEGA SBX5'],
+        'NON-PROD PEGA SBX6': ['NON-PROD PEGA SBX6'],
+        'NON-PROD PEGA SBX7': ['NON-PROD PEGA SBX7'],
+        'NON-PROD PEGA SIT1': ['NON-PROD PEGA SIT1'],
+        'NON-PROD PEGA SIT2': ['NON-PROD PEGA SIT2'],
+        'NON-PROD PEGA SIT3': ['NON-PROD PEGA SIT3'],
+        'NON-PROD PEGA SIT4': ['NON-PROD PEGA SIT4'],
+        'NON-PROD PEGA SIT5': ['NON-PROD PEGA SIT5'],
+        'NON-PROD PEGA SIT6': ['NON-PROD PEGA SIT6'],
+        'NON-PROD PEGA SIT7': ['NON-PROD PEGA SIT7'],
+        'NON-PROD PEGA UAT1': ['NON-PROD PEGA UAT1'],
+        'NON-PROD PEGA UAT2': ['NON-PROD PEGA UAT2'], 
+        'NON-PROD PEGA UAT3': ['NON-PROD PEGA UAT3'],
+        'NON-PROD PEGA UAT4': ['NON-PROD PEGA UAT4'],
+        'NON-PROD PEGA UAT5': ['NON-PROD PEGA UAT5'], 
+        'NON-PROD PEGA UAT6': ['NON-PROD PEGA UAT6'],
+        'NON-PROD PEGA UAT7': ['NON-PROD PEGA UAT7'],  
+        'NON-PROD PEGA PERF1 LOADBALANCER F5': ['NON-PROD PEGA PERF1 LOADBALANCER'],
+        'NON-PROD PEGA PERF1 HAZELCAST': ['NON-PROD PEGA PERF1 HAZELCAST'],
+        'NON-PROD PEGA PERF1': ['NON-PROD PEGA PERF1', 'STREAM', 'SEARCH', 'BACKGROUND', 'BIX', 'AGENT'],
+        'NON-PROD PEGA PERF1 PDM': ['NON-PROD PEGA PERF1 PDM'],
+        'NON-PROD PEGA PERF1 WEBUSER': ['NON-PROD PEGA PERF1 WEBUSER'],
+        'NON-PROD PEGA PERF2 LOADBALANCER F5': ['NON-PROD PEGA PERF2 LOADBALANCER'],
+        'NON-PROD PEGA PERF2 HAZELCAST': ['NON-PROD PEGA PERF2 HAZELCAST'],
+        'NON-PROD PEGA PERF2': ['NON-PROD PEGA PERF2', 'STREAM', 'SEARCH', 'BACKGROUND', 'BIX', 'AGENT'],
+        'NON-PROD PEGA PERF2 PDM': ['NON-PROD PEGA PERF2 PDM'],
+        'NON-PROD PEGA PERF2 WEBUSER': ['NON-PROD PEGA PERF2 WEBUSER'],
+    }
+
+    # Check each category for matching keywords (prioritize longer matches first)
+    for category, keywords in category_keywords.items():
+        # Sort keywords by length (descending) to match longer phrases first
+        sorted_keywords = sorted(keywords, key=len, reverse=True)
+        for keyword in sorted_keywords:
+            if keyword in env_upper:
+                return category
+    
+    return 'OTHER'
+
+def clean_env_name(env_name):
+    # Comprehensive list of words/phrases to remove (sorted by length descending for better matching)
+    if not env_name:
+        return env_name    
+    cleaned_name = env_name.strip()
+
+    words_to_remove = {
+        'NON-PROD PEGA DEV1', 'NON-PROD PEGA DEV2', 'NON-PROD PEGA DEV3', 'NON-PROD PEGA DEV4', 'NON-PROD PEGA DEV5', 'NON-PROD PEGA DEV6', 'NON-PROD PEGA DEV7',
+        'NON-PROD PEGA SBX1', 'NON-PROD PEGA SBX2', 'NON-PROD PEGA SBX3', 'NON-PROD PEGA SBX4', 'NON-PROD PEGA SBX5', 'NON-PROD PEGA SBX6', 'NON-PROD PEGA SBX7',
+        'NON-PROD PEGA SIT1', 'NON-PROD PEGA SIT2', 'NON-PROD PEGA SIT3', 'NON-PROD PEGA SIT4', 'NON-PROD PEGA SIT5', 'NON-PROD PEGA SIT6', 'NON-PROD PEGA SIT7',
+        'NON-PROD PEGA UAT1', 'NON-PROD PEGA UAT2', 'NON-PROD PEGA UAT3', 'NON-PROD PEGA UAT4', 'NON-PROD PEGA UAT5', 'NON-PROD PEGA UAT6', 'NON-PROD PEGA UAT7',
+        'NON-PROD PEGA PERF1 LOADBALANCER', 'NON-PROD PEGA PERF1 HAZELCAST', 'NON-PROD PEGA PERF1', 'NON-PROD PEGA PERF1 PDM', 'NON-PROD PEGA PERF1 WEBUSER', 
+        'NON-PROD PEGA PERF2 LOADBALANCER', 'NON-PROD PEGA PERF1 HAZELCAST', 'NON-PROD PEGA PERF2', 'NON-PROD PEGA PERF2 PDM', 'NON-PROD PEGA PERF2 WEBUSER'
+    }
+    
+    # Remove category words using regex for better word boundary matching
+    for word in words_to_remove:
+        # Create pattern that matches the word with optional word boundaries
+        pattern = re.compile(re.escape(word), re.IGNORECASE)
+        cleaned_name = pattern.sub('', cleaned_name)
+    
+    # Clean up multiple spaces, tabs, and newlines
+    cleaned_name = re.sub(r'\s+', ' ', cleaned_name)
+    
+    # Remove leading/trailing spaces and common separators
+    cleaned_name = cleaned_name.strip(' -_.,;:')
+    
+    # Handle edge cases where cleaning results in empty or very short strings
+    if not cleaned_name or len(cleaned_name.strip()) < 2:
+        return env_name
+    
+    return cleaned_name
+
+def results_by_category(results):
+    """Group results by preferred category with proper within-category sorting"""
+
+    """Group results by the detailed categories"""
+    grouped_results = defaultdict(list)
+    for res in results:
+        category = get_category(res['Non-Prod Env'])
+        grouped_results[category].append(res)
+   
+    # The order in which groups should appear in Excel/Email
+    category_order = [
+        'NON-PROD PEGA DEV1', 'NON-PROD PEGA DEV2', 'NON-PROD PEGA DEV3', 'NON-PROD PEGA DEV4', 'NON-PROD PEGA DEV5', 'NON-PROD PEGA DEV6', 'NON-PROD PEGA DEV7', 
+        'NON-PROD PEGA SBX1', 'NON-PROD PEGA SBX2', 'NON-PROD PEGA SBX3', 'NON-PROD PEGA SBX4', 'NON-PROD PEGA SBX5', 'NON-PROD PEGA SBX6', 'NON-PROD PEGA SBX7', 
+        'NON-PROD PEGA SIT1', 'NON-PROD PEGA SIT2', 'NON-PROD PEGA SIT3', 'NON-PROD PEGA SIT4', 'NON-PROD PEGA SIT5', 'NON-PROD PEGA SIT6', 'NON-PROD PEGA SIT7', 
+        'NON-PROD PEGA UAT1', 'NON-PROD PEGA UAT2', 'NON-PROD PEGA UAT3', 'NON-PROD PEGA UAT4', 'NON-PROD PEGA UAT5', 'NON-PROD PEGA UAT6', 'NON-PROD PEGA UAT7',  
+        'NON-PROD PEGA PERF1 LOADBALANCER F5',
+        'NON-PROD PEGA PERF1 HAZELCAST',
+        'NON-PROD PEGA PERF1',
+        'NON-PROD PEGA PERF1 PDM',
+        'NON-PROD PEGA PERF1 WEBUSER',
+        'NON-PROD PEGA PERF2 LOADBALANCER F5',
+        'NON-PROD PEGA PERF2 HAZELCAST',
+        'NON-PROD PEGA PERF2',
+        'NON-PROD PEGA PERF2 PDM',
+        'NON-PROD PEGA PERF2 WEBUSER'
+    ]
+
+    # Define environment order within each category for consistent sorting
+    env_order_within_category = {
+        'PEGA DEV1': [
+            'F5 URL', 'BackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL', 'WebUser Nodes F5 Pool Status', 'WebUser Node URL'
+        ],
+        'PEGA DEV2': [
+            'F5 URL', 'BackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL', 'WebUser Nodes F5 Pool Status', 'WebUser Node URL'
+        ],
+        'PEGA DEV3': [
+            'F5 URL', 'BackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL', 'WebUser Nodes F5 Pool Status', 'WebUser Node URL'
+        ],
+        'PEGA DEV4': [
+            'F5 URL', 'BackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL', 'WebUser Nodes F5 Pool Status', 'WebUser Node URL'
+        ],
+        'PEGA DEV5': [
+            'F5 URL', 'BackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL', 'WebUser Nodes F5 Pool Status', 'WebUser Node URL'
+        ],
+        'PEGA DEV6': [
+            'F5 URL', 'BackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL', 'WebUser Nodes F5 Pool Status', 'WebUser Node URL'
+        ],
+        'PEGA DEV7': [
+            'F5 URL', 'BackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL', 'WebUser Nodes F5 Pool Status', 'WebUser Node URL'
+        ],
+        'PEGA SBX1': [
+            'F5 URL', 'F5 Pool Status', 'BackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL', 'WebUser Node URL'
+        ],
+        'PEGA SBX2': [
+            'F5 URL', 'F5 Pool Status', 'BackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL', 'WebUser Node URL'
+        ],
+        'PEGA SBX3': [
+            'F5 URL', 'F5 Pool Status', 'BackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL', 'WebUser Node URL'
+        ],
+        'PEGA SBX4': [
+            'F5 URL', 'F5 Pool Status', 'BackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL', 'WebUser Node URL'
+        ],
+        'PEGA SBX5': [
+            'F5 URL', 'F5 Pool Status', 'BackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL', 'WebUser Node URL'
+        ],
+        'PEGA SBX6': [
+            'F5 URL', 'F5 Pool Status', 'BackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL', 'WebUser Node URL'
+        ],
+        'PEGA SBX7': [
+            'F5 URL', 'F5 Pool Status', 'BackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL', 'WebUser Node URL'
+        ],
+        'PEGA SIT1': [
+            'F5 URL', 'BackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL', 'WebUser Nodes F5 Pool Status', 'WebUser Node URL'
+        ],
+        'PEGA SIT2': [
+            'F5 URL', 'BackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL', 'WebUser Nodes F5 Pool Status', 'WebUser Node URL'
+        ],
+        'PEGA SIT3': [
+            'F5 URL', 'BackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL', 'WebUser Nodes F5 Pool Status', 'WebUser Node URL'
+        ],
+        'PEGA SIT4': [
+            'F5 URL', 'BackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL', 'WebUser Nodes F5 Pool Status', 'WebUser Node URL'
+        ],
+        'PEGA SIT5': [
+            'F5 URL', 'BackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL', 'WebUser Nodes F5 Pool Status', 'WebUser Node URL'
+        ],
+        'PEGA SIT6': [
+            'F5 URL', 'BackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL', 'WebUser Nodes F5 Pool Status', 'WebUser Node URL'
+        ],
+        'PEGA SIT7': [
+            'F5 URL', 'BackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL', 'WebUser Nodes F5 Pool Status', 'WebUser Node URL'
+        ],
+        'PEGA UAT1': [
+            'F5 URL', 'BackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL', 'WebUser Nodes F5 Pool Status', 'WebUser Node URL'
+        ],
+        'PEGA UAT2': [
+            'F5 URL', 'BackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL', 'WebUser Nodes F5 Pool Status', 'WebUser Node URL'
+        ],
+        'PEGA UAT3': [
+            'F5 URL', 'BackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL', 'WebUser Nodes F5 Pool Status', 'WebUser Node URL'
+        ],
+        'PEGA UAT4': [
+            'F5 URL', 'BackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL', 'WebUser Nodes F5 Pool Status', 'WebUser Node URL'
+        ],
+        'PEGA UAT5': [
+            'F5 URL', 'BackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL', 'WebUser Nodes F5 Pool Status', 'WebUser Node URL'
+        ],
+        'PEGA UAT6': [
+            'F5 URL', 'BackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL', 'WebUser Nodes F5 Pool Status', 'WebUser Node URL'
+        ],
+        'PEGA UAT7': [
+            'F5 URL', 'BackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL', 'WebUser Nodes F5 Pool Status', 'WebUser Node URL'
+        ],
+        'PEGA PERF1': [
+            'LOADBALANCER F5 URL', 'LOADBALANCER F5 Pool Status', 'HAZELCAST Node URL', 'Stream Node URL', 'Search Node URL', 'BackgroundProcessing,AgentRun3BGNodes URL', 'BackgroundProcessing,BIX,\nAgentRun2BGNodes,AgentRun3BGNodes URL', 'BackgroundProcessing,\nAgentRun2BGNodes,AgentRun3BGNodes URL', 'PDM Node URL', 'WEBUSER Node URL'
+        ],
+        'PEGA PERF2': [
+            'LOADBALANCER F5 URL', 'LOADBALANCER F5 Pool Status', 'HAZELCAST Node URL', 'Stream Node URL', 'Search Node URL', 'BackgroundProcessing,AgentRun3BGNodes URL', 'BackgroundProcessing,BIX,\nAgentRun2BGNodes,AgentRun3BGNodes URL', 'BackgroundProcessing,\nAgentRun2BGNodes,AgentRun3BGNodes URL', 'PDM Node URL', 'WEBUSER Node URL'
+        ],
+    }
+    sorted_categories = sorted(grouped_results.keys(), 
+                               key=lambda x: category_order.index(x) if x in category_order else 999)
+    # Return sorted results with within-category sorting   
+    sorted_results = []
+    for category in sorted_categories:
+        # Sorting within each group remains based on your original logic
+        category_results = grouped_results[category]
+        # Sort within category using the defined order
+        if category in env_order_within_category:
+            env_order = env_order_within_category[category]
+            category_results.sort(key=lambda x: env_order.index(x['Non-Prod Env']) if x['Non-Prod Env'] in env_order else len(env_order))
+        sorted_results.extend(category_results)
+   
+    return sorted_results
+
+# ================== GENERATE EXCEL REPORT (FIXED) ==================
+def generate_excel_report(results, total_urls=0, up_count=0, duration_str="", end_et=None):
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    now = datetime.now()
+    shift = "S1" if 6 <= now.hour < 15 else "S2" if 15 <= now.hour < 23 else "S3"
+    date_str = now.strftime("%Y%m%d")
+    excel_filename = f"SPS_Non-Prod_HealthCheck_Report_{date_str}_{shift}.xlsx"
+    excel_path = os.path.join(script_dir, excel_filename) # Full absolute path
+
+    data = []
+    for res in results:
+        status_text = str(res['URLStatus'])
+        clean_status = re.sub(r'<[^>]+>', '', status_text).strip()
+        health = 'UP' if 'UP' in status_text or 'JVM UP' in status_text else 'DOWN'
+        data.append({
+            'Env Type': get_category(res['Non-Prod Env']),
+            'F5 and Node URL Names': clean_env_name(res['Non-Prod Env']),
+            'F5 and Node URLs': res['F5 and Node URLs'],
+            'Status Code': res['StatusCode'],
+            'URL Status': clean_status,
+            'Health': health
+        })
+
+    df = pd.DataFrame(data)
+
+    with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
+        df.to_excel(writer, sheet_name='Health Check Report', index=False)
+        ws = writer.sheets['Health Check Report']
+        
+        ws.insert_rows(1, 5)
+        ws['A1'] = "SPS Non-Production Environment Health Check Report"
+        ws['A1'].font = Font(size=14, bold=True)
+        ws['A2'] = f"Report Generated: {end_et.strftime(fmt) if end_et else 'N/A'}"
+        ws['A3'] = f"Total URLs: {total_urls} | UP: {up_count} | DOWN: {total_urls-up_count} | Success Rate: {round((up_count/total_urls)*100, 2)}% | Duration: {duration_str}"
+
+        # Header formatting
+        header_fill = PatternFill('solid', fgColor="366092")
+        for cell in ws[7]:
+            cell.fill = header_fill
+            cell.font = Font(color="FFFFFF", bold=True)
+            cell.alignment = Alignment(horizontal='center')
+
+        # Color coding
+        for row in range(8, 8 + len(df)):
+            cell = ws.cell(row=row, column=6)
+            cell.fill = PatternFill('solid', fgColor="C6EFCE") if cell.value == 'UP' else PatternFill('solid', fgColor="FFC7CE")
+
+        # Auto adjust columns
+        for col in ws.columns:
+            max_length = max(len(str(cell.value or "")) for cell in col)
+            col_letter = get_column_letter(col[0].column)
+            ws.column_dimensions[col_letter].width = min(max_length + 3, 80)
+
+    print(f"✅ Excel report generated successfully: {excel_filename}")
+    return excel_path # Return full path
+
+# ================== SEND EMAIL ==================
+def send_outlook_mail(results, screenshot_paths=None, excel_file=None, total_urls=0, up_count=0, duration_str="", end_et=None):
+    """Drafts the formatted results via Outlook Desktop App with optional screenshots"""
+    print("\n📧 Drafting Outlook email...")
+    now = datetime.now()
+    hour = now.hour
+    shift = "S1" if 6 <= hour < 15 else "S2" if 15 <= hour < 23 else "S3"
+    date_today = now.strftime("%d %B %Y")
+
+    down_count = total_urls - up_count
+    success_rate = round((up_count / total_urls) * 100, 2) if total_urls > 0 else 0
+
+    outlook = win32.Dispatch('outlook.application')
+    mail = outlook.CreateItem(0)
+    mail.To = 'Venkatesh.Sure@carelon.com' # Update with actual recipient
+    mail.CC = 'Venkatesh.Sure@carelon.com'
+    #mail.To = 'dl-T-SPS-Infrastructure-offshore <dl-T-SPS-Infrastructure-offshore@legato.com>' 
+    #mail.CC = 'Ande, Sreedevi <sreedevi.ande@elevancehealth.com>; Singh, Sushant <Sushant.Singh@carelon.com>';
+    mail.Subject = f'[SPS Monitoring Report] - Non-PROD PEGA Environment: Patching Health Check Report (URLs & F5 Pool Status Artifacts)- {shift} - {date_today}' 
+    # Group results by category for merged rows
+    from collections import defaultdict
+    grouped_results = defaultdict(list)
+    for res in results:
+        category = get_category(res['Non-Prod Env'])
+        grouped_results[category].append(res)
+
+    # Sort categories to maintain consistent order
+    category_order = [
+        'NON-PROD PEGA DEV1',
+        'NON-PROD PEGA DEV2', 
+        'NON-PROD PEGA DEV3',
+        'NON-PROD PEGA DEV4', 
+        'NON-PROD PEGA DEV5',
+        'NON-PROD PEGA DEV6', 
+        'NON-PROD PEGA DEV7', 
+        'NON-PROD PEGA SBX1', 
+        'NON-PROD PEGA SBX2', 
+        'NON-PROD PEGA SBX3', 
+        'NON-PROD PEGA SBX4', 
+        'NON-PROD PEGA SBX5', 
+        'NON-PROD PEGA SBX6', 
+        'NON-PROD PEGA SBX7', 
+        'NON-PROD PEGA SIT1', 
+        'NON-PROD PEGA SIT2', 
+        'NON-PROD PEGA SIT3', 
+        'NON-PROD PEGA SIT4', 
+        'NON-PROD PEGA SIT5', 
+        'NON-PROD PEGA SIT6', 
+        'NON-PROD PEGA SIT7', 
+        'NON-PROD PEGA UAT1', 
+        'NON-PROD PEGA UAT2', 
+        'NON-PROD PEGA UAT3', 
+        'NON-PROD PEGA UAT4', 
+        'NON-PROD PEGA UAT5', 
+        'NON-PROD PEGA UAT6',
+        'NON-PROD PEGA UAT7',
+        'NON-PROD PEGA PERF1 LOADBALANCER F5',
+        'NON-PROD PEGA PERF1 HAZELCAST',
+        'NON-PROD PEGA PERF1',
+        'NON-PROD PEGA PERF1 PDM',
+        'NON-PROD PEGA PERF1 WEBUSER',
+        'NON-PROD PEGA PERF2 LOADBALANCER F5',
+        'NON-PROD PEGA PERF2 HAZELCAST',
+        'NON-PROD PEGA PERF2'
+        'NON-PROD PEGA PERF2 PDM',
+        'NON-PROD PEGA PERF2 WEBUSER',
+    ]
+    sorted_categories = sorted(grouped_results.keys(), key=lambda x: category_order.index(x) if x in category_order else len(category_order))
+    
+    # Building the HTML Table for the email body with merged category cells
+    table_rows = ""
+
+    for category in sorted_categories:
+        category_results = grouped_results[category]
+        for i, res in enumerate(category_results):
+            color = "green" if res['URLStatus'] == "UP and Running" else "red"
+            
+            # Clean the environment name by removing category words
+            clean_env = clean_env_name(res['Non-Prod Env'])
+            
+            if i == 0:  # First row of this category - include category cell with rowspan
+                rowspan = len(category_results)
+                table_rows += f"""
+        <tr>
+            <td style="border:1px solid #ddd; padding:8px; font-weight:bold; background-color:#f8f9fa; text-align:center; vertical-align:middle;" rowspan="{rowspan}">{category}</td>
+            <td style="border:1px solid #ddd; padding:8px;">{clean_env}</td>
+            <td style="border:1px solid #ddd; padding:8px;">{res['F5 and Node URLs']}</td>
+            <td style="border:1px solid #ddd; padding:8px; text-align:center;">{res['StatusCode']}</td>
+            <td style="border:1px solid #ddd; padding:8px; color:{color}; font-weight:bold;">{res['URLStatus']}</td>
+        </tr>"""
+            else:  # Subsequent rows of this category - no category cell
+                table_rows += f"""
+        <tr>
+            <td style="border:1px solid #ddd; padding:8px;">{clean_env}</td>
+            <td style="border:1px solid #ddd; padding:8px;">{res['F5 and Node URLs']}</td>
+            <td style="border:1px solid #ddd; padding:8px; text-align:center;">{res['StatusCode']}</td>
+            <td style="border:1px solid #ddd; padding:8px; color:{color}; font-weight:bold;">{res['URLStatus']}</td>
+        </tr>"""
+    
+    # Add screenshot attachments if provided
+    screenshot_info = ""
+    if screenshot_paths:
+        screenshot_info = f"<p><strong>JFYI...</strong> Attached {len(screenshot_paths)} F5 Pool Status Screenshots to know current pool status.</p>"
+        for file_path in screenshot_paths:
+            if os.path.exists(file_path):
+                mail.Attachments.Add(file_path)
+                print(f"Attached screenshot: {os.path.basename(file_path)}")
+    mail.HTMLBody = f"""
+    <html>
+    <body>
+            <p>Hi Team,</p>
+            <p>Please find the below Patching Non-Production PEGA URL's Health Check report.</p>
+            {screenshot_info}
+            <p><strong>📎 Excel Report is also attached.</strong></p>
+	    <p>All Non-Prod Pega Env URL's Checking Started at <i>{start_et.strftime(fmt)}</i></p>         
+    <table style="border-collapse: collapse; width: 125%; font-family: Arial, sans-serif;">
+        <!-- SUMMARY ROW -->
+        <tr style="background-color: #e6f7e6; font-weight: bold;">
+            <td style="border:1px solid #ddd; padding:8px; text-align:center;" colspan="1"><strong>SUMMARY</strong></td>
+            <td style="border:1px solid #ddd; padding:8px; text-align:center;">Total URLs: <strong>{total_urls}</strong></td>
+            <td style="border:1px solid #ddd; padding:8px; text-align:center; color:green;">UP: <strong>{up_count}</strong></td>
+            <td style="border:1px solid #ddd; padding:8px; text-align:center; color:red;">DOWN / Failed: <strong>{down_count}</strong><br></td>
+            <td style="border:1px solid #ddd; padding:8px; text-align:center; color:green;">Success Rate: <strong>{success_rate}%</strong></td>             
+        </tr>
+        <tr style="background-color: #f2f2f2;">
+            <th style="border:1px solid #ddd; padding:8px; text-align:center; width: 7%; white-space: normal;">Env Type</th>
+            <th style="border:1px solid #ddd; padding:8px; text-align:center; width: 6%; white-space: normal;">F5 and Node URL Names</th>
+            <th style="border:1px solid #ddd; padding:8px; text-align:left; width: 9%; white-space: normal;">F5 and Node URLs</th>
+            <th style="border:1px solid #ddd; padding:8px; text-align:center; width: 6%; white-space: normal;">Status Code</th>
+            <th style="border:1px solid #ddd; padding:8px; text-align:center; width: 11%; overflow: hidden; text-overflow: ellipsis;">URL Status</th>
+        </tr>
+        {table_rows}
+    </table>
+    <p>
+       All Non-Prod Pega Env URL's Checking Finished at <i>{end_et.strftime(fmt)}</i><br>
+       All Non-Prod Pega Env URL's Status Health Check Verified within <i>{duration_str}</i>
+    </p>
+    <p><i>This is an automated report.</i></p>
+    <p>Regards,<br>Venkatesh Sure</p>
+    """
+
+    # Attach Excel with delay
+    if excel_file and os.path.exists(excel_file):
+        time.sleep(1.5) # Wait for file to be fully released
+        try:
+            mail.Attachments.Add(excel_file)
+            print(f"✅ Excel file attached successfully: {os.path.basename(excel_file)}")
+        except Exception as e:
+            print(f"❌ Failed to attach Excel: {e}")
+            print(f"File path: {excel_file}")
+    else:
+        print(f"⚠️ Excel file not found for attachment: {excel_file}")
+
+    mail.Display() # Opens the window so we can see it immediately
+    print("✅ Email Drafted and Saved to Outlook Drafts Successfully.")
+
+# ================== MAIN EXECUTION ==================
+# Categorized URLs
+environments = {
+    "NON-PROD PEGA DEV1 F5 URL": [
+        "https://sps.upgradedev1.elevancehealth.com/prweb/"
+    ],
+    "NON-PROD PEGA DEV1 \nBackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL": [
+        "https://dc04dlvpeg319.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA DEV1 WebUser Nodes F5 Pool Status": [
+        "https://sps.upgradedev1.elevancehealth.com/prweb/PRAuth/?f5poolstatus"
+    ],
+    "NON-PROD PEGA DEV1 WebUser Node URL": [
+        "https://dc04dlvpeg318.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04dlvpeg318.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04dlvpeg319.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA DEV2 F5 URL": [
+        "https://sps.upgradedev2.elevancehealth.com/prweb/"
+    ],
+    "NON-PROD PEGA DEV2 \nBackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL": [
+        "https://dc04dlvpeg324.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA DEV2 WebUser Nodes F5 Pool Status": [
+        "https://sps.upgradedev2.elevancehealth.com/prweb/PRAuth/?f5poolstatus"
+    ],
+    "NON-PROD PEGA DEV2 WebUser Node URL": [
+        "https://dc04dlvpeg323.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04dlvpeg323.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04dlvpeg324.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA DEV3 F5 URL": [
+        "https://sps.upgradedev3.elevancehealth.com/prweb/"
+    ],
+    "NON-PROD PEGA DEV3 \nBackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL": [
+        "https://dc04dlvpeg327.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA DEV3 WebUser Nodes F5 Pool Status": [
+        "https://sps.upgradedev3.elevancehealth.com/prweb/PRAuth/?f5poolstatus"
+    ],
+    "NON-PROD PEGA DEV3 WebUser Node URL": [
+        "https://dc04dlvpeg326.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04dlvpeg326.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04dlvpeg327.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA DEV4 F5 URL": [
+       "https://sps.upgradedev4.elevancehealth.com/prweb/"
+    ],
+    "NON-PROD PEGA DEV4 \nBackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL": [
+       "https://dc04dlvpeg330.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA DEV4 WebUser Nodes F5 Pool Status": [
+        "https://sps.upgradedev4.elevancehealth.com/prweb/PRAuth/?f5poolstatus"
+    ],
+    "NON-PROD PEGA DEV4 WebUser Node URL": [
+       "https://dc04dlvpeg329.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04dlvpeg329.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04dlvpeg330.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA DEV5 F5 URL": [
+       "https://sps.upgradedev5.elevancehealth.com/prweb/"
+    ],
+    "NON-PROD PEGA DEV5 \nBackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL": [
+       "https://dc04dlvpeg333.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA DEV5 WebUser Nodes F5 Pool Status": [
+        "https://sps.upgradedev5.elevancehealth.com/prweb/PRAuth/?f5poolstatus"
+    ],
+    "NON-PROD PEGA DEV5 WebUser Node URL": [
+       "https://dc04dlvpeg332.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04dlvpeg332.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04dlvpeg333.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA DEV6 F5 URL": [
+       "https://sps.upgradedev6.elevancehealth.com/prweb/"
+    ],
+    "NON-PROD PEGA DEV6 \nBackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL": [
+       "https://dc04dlvpeg336.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA DEV6 WebUser Nodes F5 Pool Status": [
+        "https://sps.upgradedev6.elevancehealth.com/prweb/PRAuth/?f5poolstatus"
+    ],
+    "NON-PROD PEGA DEV6 WebUser Node URL": [
+       "https://dc04dlvpeg335.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04dlvpeg335.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04dlvpeg336.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA DEV7 F5 URL": [
+       "https://sps.upgradedev7.elevancehealth.com/prweb/"
+    ],
+    "NON-PROD PEGA DEV7 \nBackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL": [
+       "https://dc04dlvpeg339.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA DEV7 WebUser Nodes F5 Pool Status": [
+        "https://sps.upgradedev7.elevancehealth.com/prweb/PRAuth/?f5poolstatus"
+    ],
+    "NON-PROD PEGA DEV7 WebUser Node URL": [
+       "https://dc04dlvpeg338.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04dlvpeg338.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04dlvpeg339.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA SBX1 F5 URL": [
+        "https://sps.pegaupgradesbx1.elevancehealth.com/prweb/"
+    ],
+    "NON-PROD PEGA SBX1 F5 Pool Status": [
+        "https://sps.pegaupgradesbx1.elevancehealth.com/prweb/PRAuth/?f5poolstatus"
+    ],
+    "NON-PROD PEGA SBX1 \nBackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL": [
+        "https://dc04dlvpeg317.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA SBX1 WebUser Node URL": [
+        "https://dc04dlvpeg317.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA SBX2 F5 URL": [
+        "https://sps.pegaupgradesbx2.elevancehealth.com/prweb/"
+    ],
+    "NON-PROD PEGA SBX2 F5 Pool Status": [
+        "https://sps.pegaupgradesbx2.elevancehealth.com/prweb/PRAuth/?f5poolstatus"
+    ],
+    "NON-PROD PEGA SBX2 \nBackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL": [
+        "https://dc04dlvpeg322.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA SBX2 WebUser Node URL": [
+        "https://dc04dlvpeg322.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA SBX3 F5 URL": [
+        "https://sps.pegaupgradesbx3.elevancehealth.com/prweb/"
+    ],
+    "NON-PROD PEGA SBX3 F5 Pool Status": [
+        "https://sps.pegaupgradesbx3.elevancehealth.com/prweb/PRAuth/?f5poolstatus"
+    ],
+    "NON-PROD PEGA SBX3 \nBackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL": [
+        "https://dc04dlvpeg325.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA SBX3 WebUser Node URL": [
+        "https://dc04dlvpeg325.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA SBX4 F5 URL": [
+        "https://sps.pegaupgradesbx4.elevancehealth.com/prweb/"
+    ],
+    "NON-PROD PEGA SBX4 F5 Pool Status": [
+        "https://sps.pegaupgradesbx4.elevancehealth.com/prweb/PRAuth/?f5poolstatus"
+    ],
+    "NON-PROD PEGA SBX4 \nBackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL": [
+        "https://dc04dlvpeg328.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA SBX4 WebUser Node URL": [
+        "https://dc04dlvpeg328.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA SBX5 F5 URL": [
+        "https://sps.pegaupgradesbx5.elevancehealth.com/prweb/"
+    ],
+    "NON-PROD PEGA SBX5 F5 Pool Status": [
+        "https://sps.pegaupgradesbx5.elevancehealth.com/prweb/PRAuth/?f5poolstatus"
+    ],
+    "NON-PROD PEGA SBX5 \nBackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL": [
+        "https://dc04dlvpeg331.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA SBX5 WebUser Node URL": [
+        "https://dc04dlvpeg331.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA SBX6 F5 URL": [
+        "https://sps.pegaupgradesbx6.elevancehealth.com/prweb/"
+    ],
+    "NON-PROD PEGA SBX6 F5 Pool Status": [
+        "https://sps.pegaupgradesbx6.elevancehealth.com/prweb/PRAuth/?f5poolstatus"
+    ],
+    "NON-PROD PEGA SBX6 \nBackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL": [
+        "https://dc04dlvpeg334.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA SBX6 WebUser Node URL": [
+        "https://dc04dlvpeg334.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA SBX7 F5 URL": [
+        "https://sps.pegaupgradesbx7.elevancehealth.com/prweb/"
+    ],
+    "NON-PROD PEGA SBX7 F5 Pool Status": [
+        "https://sps.pegaupgradesbx7.elevancehealth.com/prweb/PRAuth/?f5poolstatus"
+    ],
+    "NON-PROD PEGA SBX7 \nBackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL": [
+        "https://dc04dlvpeg337.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA SBX7 WebUser Node URL": [
+        "https://dc04dlvpeg337.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA SIT1 F5 URL": [
+        "https://sps.upgradesit1.elevancehealth.com/prweb/"
+    ],
+    "NON-PROD PEGA SIT1 \nBackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL": [
+        "https://dc04tlvpeg414.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA SIT1 WebUser Nodes F5 Pool Status": [
+        "https://sps.upgradesit1.elevancehealth.com/prweb/PRAuth/?f5poolstatus"
+    ],
+    "NON-PROD PEGA SIT1 WebUser Node URL": [
+        "https://dc04tlvpeg413.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04tlvpeg413.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04tlvpeg414.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA SIT2 F5 URL": [
+        "https://sps.upgradesit2.elevancehealth.com/prweb/"
+    ],
+    "NON-PROD PEGA SIT2 \nBackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL": [
+        "https://dc04tlvpeg434.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA SIT2 WebUser Nodes F5 Pool Status": [
+        "https://sps.upgradesit2.elevancehealth.com/prweb/PRAuth/?f5poolstatus"
+    ],
+    "NON-PROD PEGA SIT2 WebUser Node URL": [
+        "https://dc04tlvpeg433.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04tlvpeg433.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04tlvpeg434.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA SIT3 F5 URL": [
+        "https://sps.upgradesit3.elevancehealth.com/prweb/"
+    ],
+    "NON-PROD PEGA SIT3 \nBackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL": [
+        "https://dc04tlvpeg453.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA SIT3 WebUser Nodes F5 Pool Status": [
+        "https://sps.upgradesit3.elevancehealth.com/prweb/PRAuth/?f5poolstatus"
+    ],
+    "NON-PROD PEGA SIT3 WebUser Node URL": [
+        "https://dc04tlvpeg452.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04tlvpeg452.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04tlvpeg453.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA SIT4 F5 URL": [
+       "https://sps.upgradesit4.elevancehealth.com/prweb/"
+    ],
+    "NON-PROD PEGA SIT4 \nBackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL": [
+       "https://dc04tlvpeg457.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA SIT4 WebUser Nodes F5 Pool Status": [
+        "https://sps.upgradesit4.elevancehealth.com/prweb/PRAuth/?f5poolstatus"
+    ],
+    "NON-PROD PEGA SIT4 WebUser Node URL": [
+       "https://dc04tlvpeg456.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg456.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg457.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA SIT5 F5 URL": [
+       "https://sps.upgradesit5.elevancehealth.com/prweb/"
+    ],
+    "NON-PROD PEGA SIT5 \nBackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL": [
+       "https://dc04tlvpeg461.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA SIT5 WebUser Nodes F5 Pool Status": [
+        "https://sps.upgradesit5.elevancehealth.com/prweb/PRAuth/?f5poolstatus"
+    ],
+    "NON-PROD PEGA SIT5 WebUser Node URL": [
+       "https://dc04tlvpeg460.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg460.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg461.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA SIT6 F5 URL": [
+       "https://sps.upgradesit6.elevancehealth.com/prweb/"
+    ],
+    "NON-PROD PEGA SIT6 \nBackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL": [
+       "https://dc04tlvpeg465.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA SIT6 WebUser Nodes F5 Pool Status": [
+        "https://sps.upgradesit6.elevancehealth.com/prweb/PRAuth/?f5poolstatus"
+    ],
+    "NON-PROD PEGA SIT6 WebUser Node URL": [
+       "https://dc04tlvpeg464.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg464.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg465.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA SIT7 F5 URL": [
+       "https://sps.upgradesit7.elevancehealth.com/prweb/"
+    ],
+    "NON-PROD PEGA SIT7 \nBackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL": [
+       "https://dc04tlvpeg469.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA SIT7 WebUser Nodes F5 Pool Status": [
+        "https://sps.upgradesit7.elevancehealth.com/prweb/PRAuth/?f5poolstatus"
+    ],
+    "NON-PROD PEGA SIT7 WebUser Node URL": [
+       "https://dc04tlvpeg468.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg468.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg469.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA UAT1 F5 URL": [
+        "https://sps.upgradeuat1.elevancehealth.com/prweb/"
+    ],
+    "NON-PROD PEGA UAT1 \nBackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL": [
+        "https://dc04tlvpeg416.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA UAT1 WebUser Nodes F5 Pool Status": [
+        "https://sps.upgradeuat1.elevancehealth.com/prweb/PRAuth/?f5poolstatus"
+    ],
+    "NON-PROD PEGA UAT1 WebUser Node URL": [
+        "https://dc04tlvpeg415.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04tlvpeg415.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04tlvpeg416.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA UAT2 F5 URL": [
+        "https://sps.upgradeuat2.elevancehealth.com/prweb/"
+    ],
+    "NON-PROD PEGA UAT2 \nBackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL": [
+        "https://dc04tlvpeg436.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA UAT2 WebUser Nodes F5 Pool Status": [
+        "https://sps.upgradeuat2.elevancehealth.com/prweb/PRAuth/?f5poolstatus"
+    ],
+    "NON-PROD PEGA UAT2 WebUser Node URL": [
+        "https://dc04tlvpeg435.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04tlvpeg435.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04tlvpeg436.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA UAT3 F5 URL": [
+        "https://sps.upgradeuat3.elevancehealth.com/prweb/"
+    ],
+    "NON-PROD PEGA UAT3 \nBackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL": [
+        "https://dc04tlvpeg455.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA UAT3 WebUser Nodes F5 Pool Status": [
+        "https://sps.upgradeuat3.elevancehealth.com/prweb/PRAuth/?f5poolstatus"
+    ],
+    "NON-PROD PEGA UAT3 WebUser Node URL": [
+        "https://dc04tlvpeg454.wellpoint.com:8443/prweb/PRServlet/",
+        "https://dc04tlvpeg454.wellpoint.com:8444/prweb/PRServlet/",
+        "https://dc04tlvpeg455.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA UAT4 F5 URL": [
+       "https://sps.upgradeuat4.elevancehealth.com/prweb/"
+    ],
+    "NON-PROD PEGA UAT4 \nBackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL": [
+       "https://dc04tlvpeg459.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA UAT4 WebUser Nodes F5 Pool Status": [
+        "https://sps.upgradeuat4.elevancehealth.com/prweb/PRAuth/?f5poolstatus"
+    ],
+    "NON-PROD PEGA UAT4 WebUser Node URL": [
+       "https://dc04tlvpeg458.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg458.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg459.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA UAT5 F5 URL": [
+       "https://sps.upgradeuat5.elevancehealth.com/prweb/"
+    ],
+    "NON-PROD PEGA UAT5 \nBackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL": [
+       "https://dc04tlvpeg463.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA UAT5 WebUser Nodes F5 Pool Status": [
+        "https://sps.upgradeuat5.elevancehealth.com/prweb/PRAuth/?f5poolstatus"
+    ],
+    "NON-PROD PEGA UAT5 WebUser Node URL": [
+       "https://dc04tlvpeg462.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg462.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg463.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA UAT6 F5 URL": [
+       "https://sps.upgradeuat6.elevancehealth.com/prweb/"
+    ],
+    "NON-PROD PEGA UAT6 \nBackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL": [
+       "https://dc04tlvpeg467.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA UAT6 WebUser Nodes F5 Pool Status": [
+        "https://sps.upgradeuat6.elevancehealth.com/prweb/PRAuth/?f5poolstatus"
+    ],
+    "NON-PROD PEGA UAT6 WebUser Node URL": [
+       "https://dc04tlvpeg466.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg466.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg467.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA UAT7 F5 URL": [
+       "https://sps.upgradeuat7.elevancehealth.com/prweb/"
+    ],
+    "NON-PROD PEGA UAT7 \nBackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL": [
+       "https://dc04tlvpeg471.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA UAT7 WebUser Nodes F5 Pool Status": [
+        "https://sps.upgradeuat7.elevancehealth.com/prweb/PRAuth/?f5poolstatus"
+    ],
+    "NON-PROD PEGA UAT7 WebUser Node URL": [
+       "https://dc04tlvpeg470.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg470.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg471.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA PERF1 LOADBALANCER F5 URL": [
+       "https://sps.perf88.elevancehealth.com/prweb/",
+       "https://spspegautility.perf88.elevancehealth.com/prweb/",
+       "https://pdmapp.perf88.elevancehealth.com/prweb/"
+    ],
+    "NON-PROD PEGA PERF1 LOADBALANCER F5 Pool Status": [
+       "https://sps.perf88.elevancehealth.com/prweb/PRAuth/?f5poolstatus",
+       "https://spspegautility.perf88.elevancehealth.com/prweb/PRAuth/?f5poolstatus",
+       "https://pdmapp.perf88.elevancehealth.com/prweb/PRAuth/?f5poolstatus"
+    ],
+    "NON-PROD PEGA PERF1 HAZELCAST Node URL": [
+       "https://va10tlvpeg366.wellpoint.com:8443/prcluster_service/ClusterServiceHealthCheck",
+       "https://va10tlvpeg367.wellpoint.com:8443/prcluster_service/ClusterServiceHealthCheck",
+       "https://va10tlvpeg368.wellpoint.com:8443/prcluster_service/ClusterServiceHealthCheck"
+    ],
+    "NON-PROD PEGA PERF1 Stream Node URL": [
+       "https://dc04tlvpeg417.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg419.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA PERF1 Search Node URL": [
+       "https://dc04tlvpeg417.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg418.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA PERF1 BackgroundProcessing,AgentRun3BGNodes URL": [
+       "https://dc04tlvpeg419.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg418.wellpoint.com:8444/prweb/PRServlet/",
+    ],
+    "NON-PROD PEGA PERF1 BackgroundProcessing,BIX,\nAgentRun2BGNodes,AgentRun3BGNodes URL": [
+       "https://dc04tlvpeg420.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA PERF1 BackgroundProcessing,\nAgentRun2BGNodes,AgentRun3BGNodes URL": [
+       "https://dc04tlvpeg420.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA PERF1 PDM Node URL": [
+       "https://dc04tlvpeg422.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg422.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg423.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg423.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg424.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg424.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg425.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg425.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg421.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg421.wellpoint.com:8443/prweb/PRServlet/",
+    ],
+    "NON-PROD PEGA PERF1 WEBUSER Node URL": [
+       "https://dc04tlvpeg426.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg426.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg427.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg427.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg428.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg428.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg429.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg429.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg430.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg430.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg431.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg431.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA PERF2 LOADBALANCER F5 URL": [
+       "https://sps.perf288.elevancehealth.com/prweb/",
+       "https://spspegautility.perf288.elevancehealth.com/prweb/",
+       "https://pdmapp.perf288.elevancehealth.com/prweb/"
+    ],
+    "NON-PROD PEGA PERF2 LOADBALANCER F5 Pool Status": [
+       "https://sps.perf288.elevancehealth.com/prweb/PRAuth/?f5poolstatus",
+       "https://spspegautility.perf288.elevancehealth.com/prweb/PRAuth/?f5poolstatus",
+       "https://pdmapp.perf288.elevancehealth.com/prweb/PRAuth/?f5poolstatus"
+    ],
+    "NON-PROD PEGA PERF2 HAZELCAST Node URL": [
+       "https://va10tlvpeg363.wellpoint.com:8443/prcluster_service/ClusterServiceHealthCheck",
+       "https://va10tlvpeg364.wellpoint.com:8443/prcluster_service/ClusterServiceHealthCheck",
+       "https://va10tlvpeg365.wellpoint.com:8443/prcluster_service/ClusterServiceHealthCheck"
+    ],
+    "NON-PROD PEGA PERF2 Stream Node URL": [
+       "https://dc04tlvpeg437.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg439.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA PERF2 Search Node URL": [
+       "https://dc04tlvpeg437.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg438.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA PERF2 BackgroundProcessing,AgentRun3BGNodes Node URL": [
+       "https://dc04tlvpeg439.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg438.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA PERF2 BackgroundProcessing,BIX,\nAgentRun2BGNodes,AgentRun3BGNodes URL": [
+       "https://dc04tlvpeg440.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA PERF2 BackgroundProcessing,\nAgentRun2BGNodes,AgentRun3BGNodes URL": [
+       "https://dc04tlvpeg440.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA PERF2 PDM Node URL": [
+       "https://dc04tlvpeg442.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg442.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg443.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg443.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg444.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg444.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg445.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg445.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg441.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg441.wellpoint.com:8443/prweb/PRServlet/"
+    ],
+    "NON-PROD PEGA PERF2 WEBUSER Node URL": [
+       "https://dc04tlvpeg446.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg446.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg447.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg447.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg448.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg448.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg449.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg449.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg450.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg450.wellpoint.com:8444/prweb/PRServlet/",
+       "https://dc04tlvpeg451.wellpoint.com:8443/prweb/PRServlet/",
+       "https://dc04tlvpeg451.wellpoint.com:8444/prweb/PRServlet/"
+    ],
+}
+
+# Flatten for the executor
+# Run validation and collect results
+tasks = []
+
+for env_name, url_list in environments.items():
+    for url in url_list:
+        # Simplified: if the URL exists in the current list, use 10, else 5
+        # Since you're iterating through the list, this will always be 10.
+        timeout_val = 10 if url in url_list else 5
+        tasks.append((env_name, url, timeout_val))
+print(f"🚀 Checking {len(tasks)} URLs in parallel...")
+
+# 2. Worker function for the thread
+def check_url(task):
+    env_name, url, timeout_val = task
+    code, status = get_status(url, timeout_val)
+    return {
+        'Non-Prod Env': env_name, 
+        'F5 and Node URLs': url, 
+        'StatusCode': code, 
+        'URLStatus': status
+    }
+
+# 3. Run Parallel Checks
+# Use ThreadPoolExecutor for I/O-bound URL checking and to Execute in parallel with RETRIEVE in order
+with ThreadPoolExecutor(max_workers=25) as executor:
+    # executor.map preserves the order of the input 'tasks'
+    unordered_results = list(executor.map(check_url, tasks))
+
+# ================== SCREENSHOTS & TIMING ==================
+# Capture Screenshots of F5 Pool Status URLs
+print("\n📸 Capturing F5 Pool Status screenshots...")
+screenshot_paths = asyncio.run(monitor_all(MONITOR_LIST))
+
+if screenshot_paths:
+    print(f"✅ Successfully captured {len(screenshot_paths)} screenshots")
+else:
+    print("⚠️ No screenshots were captured")
+
+# 2. End Time (No Microseconds) & Duration Calculation in Hours, Minutes, and Seconds
+end_ist = datetime.now(IST).replace(microsecond=0)
+end_et = end_ist.astimezone(ET)
+duration = end_ist - start_ist
+total_seconds = int(duration.total_seconds())
+# Breaking down total seconds
+hours, remainder = divmod(total_seconds, 3600)
+minutes, seconds = divmod(remainder, 60)
+print(f"\n🏁 All Non-Prod Pega Env URL's Checking Finished at: {end_ist.strftime(fmt)}/{end_et.strftime(fmt)}")
+duration_str = f"{hours}h {minutes}m {seconds}s"
+
+total_urls = len(tasks)
+up_count = sum(1 for r in unordered_results if "UP and Running" in str(r['URLStatus']) or "JVM UP" in str(r['URLStatus']))
+
+print(f"\n⏱️ All Non-Prod Pega Env URL's Status Health Check Verification Duration: {duration_str}")
+print(f"📊 Summary: {up_count}/{total_urls} UP ({round((up_count/total_urls)*100, 2)}%)\n")
+
+# Sort results by category order with proper within-category sorting
+all_results = results_by_category(unordered_results)
+
+# Generate Excel & Send the email with both status results and screenshots
+excel_file = generate_excel_report(all_results, total_urls, up_count, duration_str, end_et)
+send_outlook_mail(all_results, screenshot_paths, excel_file=excel_file, total_urls=total_urls, up_count=up_count, duration_str=duration_str, end_et=end_et)
+
+print("\n🎉 Script Executed successfully with All Results!")
