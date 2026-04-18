@@ -2,28 +2,32 @@ import requests
 import urllib3
 import time
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 import win32com.client as win32
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
 import asyncio
 import os
 from playwright.async_api import async_playwright
+import pandas as pd
+from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.utils import get_column_letter
+
+# Suppress warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 #Dependencies for Capturing ScreenShot
 #pip install playwright
 #playwright install chromium
-
-# Suppress insecure request warnings
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+#Dependencies for Generating Excel
+#pip install openpyxl
 
 try:
     from zoneinfo import ZoneInfo
 except ImportError:
-    import pytz as ZoneInfo # Fallback for older versions
+    import pytz as ZoneInfo
 
-
-# ================== Configuration: Set Time Zones ==================
+# ================== CONFIGURATION: Set Time Zones ==================
 IST = ZoneInfo("Asia/Kolkata")
 ET = ZoneInfo("America/New_York")
 fmt = "%Y-%m-%d %I:%M:%S %p %Z"
@@ -33,7 +37,6 @@ start_et = start_ist.astimezone(ET)
 
 print(f"\n🚀 All Prod Env URL's Checking started at {start_ist.strftime(fmt)} / {start_et.strftime(fmt)}")
 print("Checking URL's Status, Please Wait...\n")
-
 
 # ================== MONITOR LIST FOR SCREENSHOTS ==================
 # Screenshot monitoring list for F5 pool status URLs
@@ -343,11 +346,66 @@ def results_by_category(results):
     
     return sorted_results
 
+# ================== GENERATE EXCEL REPORT (FIXED) ==================
+def generate_excel_report(results, total_urls=0, up_count=0, duration_str="", end_et=None):
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    now = datetime.now()
+    shift = "S1" if 6 <= now.hour < 15 else "S2" if 15 <= now.hour < 23 else "S3"
+    date_str = now.strftime("%Y%m%d")
+    excel_filename = f"SPS_Prod_HealthCheck_Report_{date_str}_{shift}.xlsx"
+    excel_path = os.path.join(script_dir, excel_filename) # Full absolute path
+
+    data = []
+    for res in results:
+        status_text = str(res['URLStatus'])
+        clean_status = re.sub(r'<[^>]+>', '', status_text).strip()
+        health = 'UP' if 'UP' in status_text or 'JVM UP' in status_text else 'DOWN'
+        data.append({
+            'Env Type': get_category(res['Prod Env']),
+            'F5 and Node URL Names': clean_env_name(res['Prod Env']),
+            'F5 and Node URLs': res['F5 and Node URLs'],
+            'Status Code': res['StatusCode'],
+            'URL Status': clean_status,
+            'Health': health
+        })
+
+    df = pd.DataFrame(data)
+
+    with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
+        df.to_excel(writer, sheet_name='Health Check Report', index=False)
+        ws = writer.sheets['Health Check Report']
+        
+        ws.insert_rows(1, 5)
+        ws['A1'] = "SPS Production Environment Health Check Report"
+        ws['A1'].font = Font(size=14, bold=True)
+        ws['A2'] = f"Report Generated: {end_et.strftime(fmt) if end_et else 'N/A'}"
+        ws['A3'] = f"Total URLs: {total_urls} | UP: {up_count} | DOWN: {total_urls-up_count} | Success Rate: {round((up_count/total_urls)*100, 2)}% | Duration: {duration_str}"
+
+        # Header formatting
+        header_fill = PatternFill('solid', fgColor="366092")
+        for cell in ws[7]:
+            cell.fill = header_fill
+            cell.font = Font(color="FFFFFF", bold=True)
+            cell.alignment = Alignment(horizontal='center')
+
+        # Color coding
+        for row in range(8, 8 + len(df)):
+            cell = ws.cell(row=row, column=6)
+            cell.fill = PatternFill('solid', fgColor="C6EFCE") if cell.value == 'UP' else PatternFill('solid', fgColor="FFC7CE")
+
+        # Auto adjust columns
+        for col in ws.columns:
+            max_length = max(len(str(cell.value or "")) for cell in col)
+            col_letter = get_column_letter(col[0].column)
+            ws.column_dimensions[col_letter].width = min(max_length + 3, 80)
+
+    print(f"✅ Excel report generated successfully: {excel_filename}")
+    return excel_path # Return full path
+
 # ================== SEND EMAIL ==================
-def send_outlook_mail(results, screenshot_paths=None, total_urls=0, up_count=0, duration_str="", end_et=None):
+def send_outlook_mail(results, screenshot_paths=None, excel_file=None, total_urls=0, up_count=0, duration_str="", end_et=None):
     """Drafts the formatted results via Outlook Desktop App with optional screenshots"""
-    print("\n")
-    print("Drafting Outlook email")
+    print("\n📧 Drafting Outlook email...")
     now = datetime.now()
     hour = now.hour
     shift = "S1" if 6 <= hour < 15 else "S2" if 15 <= hour < 23 else "S3"
@@ -369,7 +427,7 @@ def send_outlook_mail(results, screenshot_paths=None, total_urls=0, up_count=0, 
     for res in results:
         category = get_category(res['Prod Env'])
         grouped_results[category].append(res)
-    
+
     # Sort categories to maintain consistent order
     category_order = [
         'PEGA', 'SPS CORE SERVICES', 'PARES CORE SERVICES', 'UIX CORE SERVICE', 'ROSTER AUTOMATION', 'SPSDARTUI', 'PKM', 'UIX', 'MATCH SERVER', 'PROV360SERVICES', 'SPSPROVRESTORE', 'SPSAUDITHISTORY', 'PROVIDER360 PDS SERVICES', 'PROVNEXUS SERVICES', 'PDT', 'BPD', 'F5 PORTAL', 'NETWORKAI', 'OEM', 'APPVIEWX', 'PARESOLD'
@@ -379,6 +437,7 @@ def send_outlook_mail(results, screenshot_paths=None, total_urls=0, up_count=0, 
     
     # Building the HTML Table for the email body with merged category cells
     table_rows = ""
+
     for category in sorted_categories:
         category_results = grouped_results[category]
         for i, res in enumerate(category_results):
@@ -421,6 +480,7 @@ def send_outlook_mail(results, screenshot_paths=None, total_urls=0, up_count=0, 
             <p>Hi Team,</p>
             <p>Please find the below Production URL's Health Check report.</p>
             {screenshot_info}
+            <p><strong>📎 Excel Report is also attached.</strong></p>
 	    <p>All Prod Env URL's Checking Started at <i>{start_et.strftime(fmt)}</i></p>         
     <table style="border-collapse: collapse; width: 100%; font-family: Arial, sans-serif;">
         <!-- SUMMARY ROW -->
@@ -444,11 +504,27 @@ def send_outlook_mail(results, screenshot_paths=None, total_urls=0, up_count=0, 
        All Prod Env URL's Checking Finished at <i>{end_et.strftime(fmt)}</i><br>
        All Prod Env URL's Status Health Check Verified within <i>{duration_str}</i>
     </p>
+
+    excel_file = generate_excel_report(all_results, total_urls, up_count, duration_str, end_et)
+
+    # Attach Excel with delay
+    if excel_file and os.path.exists(excel_file):
+        time.sleep(1.5) # Wait for file to be fully released
+        try:
+            mail.Attachments.Add(excel_file)
+            print(f"✅ Excel file attached successfully: {os.path.basename(excel_file)}")
+        except Exception as e:
+            print(f"❌ Failed to attach Excel: {e}")
+            print(f"File path: {excel_file}")
+    else:
+        print(f"⚠️ Excel file not found for attachment: {excel_file}")
+
     <p><i>This is an automated report.</i></p>
     <p>Regards,<br>Venkatesh Sure</p>
     """
     mail.Display() # Opens the window so we can see it immediately
     print("✅ Email Drafted and Saved to Outlook Drafts Successfully.")
+
 
 # ================== MAIN EXECUTION ==================
 # Categorized URLs
@@ -775,5 +851,17 @@ print(f"📊 Summary: {up_count}/{total_urls} UP ({round((up_count/total_urls)*1
 # Sort results by category order with proper within-category sorting
 all_results = results_by_category(unordered_results)
 
-# Send the email with both status results and screenshots
-send_outlook_mail(all_results, screenshot_paths, total_urls=total_urls, up_count=up_count, duration_str=duration_str, end_et=end_et)
+# Generate Excel & Send the email with both status results and screenshots
+excel_file = generate_excel_report(all_results, total_urls, up_count, duration_str, end_et)
+send_outlook_mail(all_results, screenshot_paths, excel_file=excel_file, total_urls=total_urls, up_count=up_count, duration_str=duration_str, end_et=end_et)
+
+print("\n🎉 Script Executed successfully with All Results!")
+
+Getting below error while running above code
+Traceback (most recent call last):
+  File "C:\AutomationTools\URLSTATUSOUTLOOKENVPROD.py", line 856, in <module>
+    send_outlook_mail(all_results, screenshot_paths, excel_file=excel_file, total_urls=total_urls, up_count=up_count, duration_str=duration_str, end_et=end_et)
+  File "C:\AutomationTools\URLSTATUSOUTLOOKENVPROD.py", line 517, in send_outlook_mail
+    print(f"❌ Failed to attach Excel: {e}")
+                                        ^
+NameError: name 'e' is not defined. Did you mean: 're'?
