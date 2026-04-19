@@ -221,14 +221,14 @@ def get_category(env_name):
         'NON-PROD PEGA UAT5': ['NON-PROD PEGA UAT5'], 
         'NON-PROD PEGA UAT6': ['NON-PROD PEGA UAT6'],
         'NON-PROD PEGA UAT7': ['NON-PROD PEGA UAT7'],  
-        'NON-PROD PEGA PERF1 LOADBALANCER F5': ['NON-PROD PEGA PERF1 LOADBALANCER'],
+        'NON-PROD PEGA PERF1 F5': ['NON-PROD PEGA PERF1 F5 SPS', 'NON-PROD PEGA PERF1 F5 PEGAUTILITY F5', 'NON-PROD PEGA PERF1 F5 PDMAPP F5'],
         'NON-PROD PEGA PERF1 HAZELCAST': ['NON-PROD PEGA PERF1 HAZELCAST'],
-        'NON-PROD PEGA PERF1': ['NON-PROD PEGA PERF1', 'STREAM', 'SEARCH', 'BACKGROUND', 'BIX', 'AGENT'],
+        #'NON-PROD PEGA PERF1': ['NON-PROD PEGA PERF1', 'STREAM', 'SEARCH', 'BACKGROUND', 'BIX', 'AGENT'],
         'NON-PROD PEGA PERF1 PDM': ['NON-PROD PEGA PERF1 PDM'],
         'NON-PROD PEGA PERF1 WEBUSER': ['NON-PROD PEGA PERF1 WEBUSER'],
-        'NON-PROD PEGA PERF2 LOADBALANCER F5': ['NON-PROD PEGA PERF2 LOADBALANCER'],
+        'NON-PROD PEGA PERF2 F5': ['NON-PROD PEGA PERF2 F5 SPS', 'NON-PROD PEGA PERF2 F5 PEGAUTILITY F5', 'NON-PROD PEGA PERF2 F5 PDMAPP F5'],
         'NON-PROD PEGA PERF2 HAZELCAST': ['NON-PROD PEGA PERF2 HAZELCAST'],
-        'NON-PROD PEGA PERF2': ['NON-PROD PEGA PERF2', 'STREAM', 'SEARCH', 'BACKGROUND', 'BIX', 'AGENT'],
+        #'NON-PROD PEGA PERF2': ['NON-PROD PEGA PERF2', 'STREAM', 'SEARCH', 'BACKGROUND', 'BIX', 'AGENT'],
         'NON-PROD PEGA PERF2 PDM': ['NON-PROD PEGA PERF2 PDM'],
         'NON-PROD PEGA PERF2 WEBUSER': ['NON-PROD PEGA PERF2 WEBUSER'],
     }
@@ -254,8 +254,8 @@ def clean_env_name(env_name):
         'NON-PROD PEGA SBX1', 'NON-PROD PEGA SBX2', 'NON-PROD PEGA SBX3', 'NON-PROD PEGA SBX4', 'NON-PROD PEGA SBX5', 'NON-PROD PEGA SBX6', 'NON-PROD PEGA SBX7',
         'NON-PROD PEGA SIT1', 'NON-PROD PEGA SIT2', 'NON-PROD PEGA SIT3', 'NON-PROD PEGA SIT4', 'NON-PROD PEGA SIT5', 'NON-PROD PEGA SIT6', 'NON-PROD PEGA SIT7',
         'NON-PROD PEGA UAT1', 'NON-PROD PEGA UAT2', 'NON-PROD PEGA UAT3', 'NON-PROD PEGA UAT4', 'NON-PROD PEGA UAT5', 'NON-PROD PEGA UAT6', 'NON-PROD PEGA UAT7',
-        'NON-PROD PEGA PERF1 LOADBALANCER', 'NON-PROD PEGA PERF1 HAZELCAST', 'NON-PROD PEGA PERF1', 'NON-PROD PEGA PERF1 PDM', 'NON-PROD PEGA PERF1 WEBUSER', 
-        'NON-PROD PEGA PERF2 LOADBALANCER', 'NON-PROD PEGA PERF1 HAZELCAST', 'NON-PROD PEGA PERF2', 'NON-PROD PEGA PERF2 PDM', 'NON-PROD PEGA PERF2 WEBUSER'
+        'NON-PROD PEGA PERF1 F5', 'NON-PROD PEGA PERF1 HAZELCAST', 'NON-PROD PEGA PERF1', 'NON-PROD PEGA PERF1 PDM', 'NON-PROD PEGA PERF1 WEBUSER', 
+        'NON-PROD PEGA PERF2 F5', 'NON-PROD PEGA PERF2 HAZELCAST', 'NON-PROD PEGA PERF2', 'NON-PROD PEGA PERF2 PDM', 'NON-PROD PEGA PERF2 WEBUSER'
     }
     
     # Remove category words using regex for better word boundary matching
@@ -291,14 +291,12 @@ def results_by_category(results):
         'NON-PROD PEGA SBX1', 'NON-PROD PEGA SBX2', 'NON-PROD PEGA SBX3', 'NON-PROD PEGA SBX4', 'NON-PROD PEGA SBX5', 'NON-PROD PEGA SBX6', 'NON-PROD PEGA SBX7', 
         'NON-PROD PEGA SIT1', 'NON-PROD PEGA SIT2', 'NON-PROD PEGA SIT3', 'NON-PROD PEGA SIT4', 'NON-PROD PEGA SIT5', 'NON-PROD PEGA SIT6', 'NON-PROD PEGA SIT7', 
         'NON-PROD PEGA UAT1', 'NON-PROD PEGA UAT2', 'NON-PROD PEGA UAT3', 'NON-PROD PEGA UAT4', 'NON-PROD PEGA UAT5', 'NON-PROD PEGA UAT6', 'NON-PROD PEGA UAT7',  
-        'NON-PROD PEGA PERF1 LOADBALANCER F5',
+        'NON-PROD PEGA PERF1 F5',
         'NON-PROD PEGA PERF1 HAZELCAST',
-        'NON-PROD PEGA PERF1',
         'NON-PROD PEGA PERF1 PDM',
         'NON-PROD PEGA PERF1 WEBUSER',
-        'NON-PROD PEGA PERF2 LOADBALANCER F5',
+        'NON-PROD PEGA PERF2 F5',
         'NON-PROD PEGA PERF2 HAZELCAST',
-        'NON-PROD PEGA PERF2',
         'NON-PROD PEGA PERF2 PDM',
         'NON-PROD PEGA PERF2 WEBUSER'
     ]
@@ -390,10 +388,10 @@ def results_by_category(results):
             'F5 URL', 'BackgroundProcessing,BIX,Stream,Search,\nAgentRun1BGNode,AgentRun2BGNodes,\nAgentRun3BGNodes URL', 'WebUser Nodes F5 Pool Status', 'WebUser Node URL'
         ],
         'PEGA PERF1': [
-            'LOADBALANCER F5 URL', 'LOADBALANCER F5 Pool Status', 'HAZELCAST Node URL', 'Stream Node URL', 'Search Node URL', 'BackgroundProcessing,AgentRun3BGNodes URL', 'BackgroundProcessing,BIX,\nAgentRun2BGNodes,AgentRun3BGNodes URL', 'BackgroundProcessing,\nAgentRun2BGNodes,AgentRun3BGNodes URL', 'PDM Node URL', 'WEBUSER Node URL'
+            'F5 SPS F5 URL', 'F5 PEGAUTILITY F5 URL', 'F5 PDMAPP F5 URL', 'F5 SPS F5 Pool Status', 'F5 PEGAUTILITY F5 Pool Status', 'F5 PDMAPP F5 Pool Status', 'PERF1 HAZELCAST Node URL', 'Stream Node URL', 'Search Node URL', 'BackgroundProcessing,AgentRun3BGNodes URL', 'BackgroundProcessing,BIX,\nAgentRun2BGNodes,AgentRun3BGNodes URL', 'BackgroundProcessing,\nAgentRun2BGNodes,AgentRun3BGNodes URL', 'PERF1 PDM Node URL', 'PERF1 WEBUSER Node URL'
         ],
         'PEGA PERF2': [
-            'LOADBALANCER F5 URL', 'LOADBALANCER F5 Pool Status', 'HAZELCAST Node URL', 'Stream Node URL', 'Search Node URL', 'BackgroundProcessing,AgentRun3BGNodes URL', 'BackgroundProcessing,BIX,\nAgentRun2BGNodes,AgentRun3BGNodes URL', 'BackgroundProcessing,\nAgentRun2BGNodes,AgentRun3BGNodes URL', 'PDM Node URL', 'WEBUSER Node URL'
+            'F5 SPS F5 URL', 'F5 PEGAUTILITY F5 URL', 'F5 PDMAPP F5 URL', 'F5 SPS F5 Pool Status', 'F5 PEGAUTILITY F5 Pool Status', 'F5 PDMAPP F5 Pool Status', 'PERF2 HAZELCAST Node URL', 'Stream Node URL', 'Search Node URL', 'BackgroundProcessing,AgentRun3BGNodes URL', 'BackgroundProcessing,BIX,\nAgentRun2BGNodes,AgentRun3BGNodes URL', 'BackgroundProcessing,\nAgentRun2BGNodes,AgentRun3BGNodes URL', 'PERF2 PDM Node URL', 'PERF2 WEBUSER Node URL'
         ],
     }
     sorted_categories = sorted(grouped_results.keys(), 
@@ -523,16 +521,14 @@ def send_outlook_mail(results, screenshot_paths=None, excel_file=None, total_url
         'NON-PROD PEGA UAT5', 
         'NON-PROD PEGA UAT6',
         'NON-PROD PEGA UAT7',
-        'NON-PROD PEGA PERF1 LOADBALANCER F5',
+        'NON-PROD PEGA PERF1 F5',
         'NON-PROD PEGA PERF1 HAZELCAST',
-        'NON-PROD PEGA PERF1',
         'NON-PROD PEGA PERF1 PDM',
         'NON-PROD PEGA PERF1 WEBUSER',
-        'NON-PROD PEGA PERF2 LOADBALANCER F5',
+        'NON-PROD PEGA PERF2 F5',
         'NON-PROD PEGA PERF2 HAZELCAST',
-        'NON-PROD PEGA PERF2'
         'NON-PROD PEGA PERF2 PDM',
-        'NON-PROD PEGA PERF2 WEBUSER',
+        'NON-PROD PEGA PERF2 WEBUSER'
     ]
     sorted_categories = sorted(grouped_results.keys(), key=lambda x: category_order.index(x) if x in category_order else len(category_order))
     
@@ -1004,14 +1000,22 @@ environments = {
        "https://dc04tlvpeg470.wellpoint.com:8444/prweb/PRServlet/",
        "https://dc04tlvpeg471.wellpoint.com:8443/prweb/PRServlet/"
     ],
-    "NON-PROD PEGA PERF1 LOADBALANCER F5 URL": [
-       "https://sps.perf88.elevancehealth.com/prweb/",
-       "https://spspegautility.perf88.elevancehealth.com/prweb/",
+    "NON-PROD PEGA PERF1 F5 SPS F5 URL": [
+       "https://sps.perf88.elevancehealth.com/prweb/"
+    ],
+    "NON-PROD PEGA PERF1 F5 PEGAUTILITY F5 URL": [
+       "https://spspegautility.perf88.elevancehealth.com/prweb/"
+    ],
+    "NON-PROD PEGA PERF1 F5 PDMAPP F5 URL": [
        "https://pdmapp.perf88.elevancehealth.com/prweb/"
     ],
-    "NON-PROD PEGA PERF1 LOADBALANCER F5 Pool Status": [
-       "https://sps.perf88.elevancehealth.com/prweb/PRAuth/?f5poolstatus",
-       "https://spspegautility.perf88.elevancehealth.com/prweb/PRAuth/?f5poolstatus",
+    "NON-PROD PEGA PERF1 F5 SPS F5 Pool Status": [
+       "https://sps.perf88.elevancehealth.com/prweb/PRAuth/?f5poolstatus"
+    ],
+    "NON-PROD PEGA PERF1 F5 PEGAUTILITY F5 Pool Status": [
+       "https://spspegautility.perf88.elevancehealth.com/prweb/PRAuth/?f5poolstatus"
+    ],
+    "NON-PROD PEGA PERF1 F5 PDMAPP F5 Pool Status": [
        "https://pdmapp.perf88.elevancehealth.com/prweb/PRAuth/?f5poolstatus"
     ],
     "NON-PROD PEGA PERF1 HAZELCAST Node URL": [
@@ -1063,14 +1067,22 @@ environments = {
        "https://dc04tlvpeg431.wellpoint.com:8443/prweb/PRServlet/",
        "https://dc04tlvpeg431.wellpoint.com:8444/prweb/PRServlet/"
     ],
-    "NON-PROD PEGA PERF2 LOADBALANCER F5 URL": [
-       "https://sps.perf288.elevancehealth.com/prweb/",
-       "https://spspegautility.perf288.elevancehealth.com/prweb/",
+    "NON-PROD PEGA PERF2 F5 SPS F5 URL": [
+       "https://sps.perf288.elevancehealth.com/prweb/"
+    ],
+    "NON-PROD PEGA PERF2 F5 PEGAUTILITY F5 URL": [
+       "https://spspegautility.perf288.elevancehealth.com/prweb/"
+    ],
+    "NON-PROD PEGA PERF2 F5 PDMAPP F5 URL": [
        "https://pdmapp.perf288.elevancehealth.com/prweb/"
     ],
-    "NON-PROD PEGA PERF2 LOADBALANCER F5 Pool Status": [
-       "https://sps.perf288.elevancehealth.com/prweb/PRAuth/?f5poolstatus",
-       "https://spspegautility.perf288.elevancehealth.com/prweb/PRAuth/?f5poolstatus",
+    "NON-PROD PEGA PERF2 F5 SPS F5 Pool Status": [
+       "https://sps.perf288.elevancehealth.com/prweb/PRAuth/?f5poolstatus"
+    ],
+    "NON-PROD PEGA PERF2 F5 PEGAUTILITY F5 Pool Status": [
+       "https://spspegautility.perf288.elevancehealth.com/prweb/PRAuth/?f5poolstatus"
+    ],
+    "NON-PROD PEGA PERF2 F5 PDMAPP F5 Pool Status": [
        "https://pdmapp.perf288.elevancehealth.com/prweb/PRAuth/?f5poolstatus"
     ],
     "NON-PROD PEGA PERF2 HAZELCAST Node URL": [
