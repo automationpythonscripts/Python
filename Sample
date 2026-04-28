@@ -1,1 +1,171 @@
-edit
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from webdriver_manager.chrome import ChromeDriverManager
+import time
+import ssl
+import urllib3
+import os
+
+# Disable SSL warnings and verification
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+ssl._create_default_https_context = ssl._create_unverified_context
+
+# --- Configuration ---
+OEM_URL = "https://oem.elevancehealth.com/em/faces/logon/core-uifwk-console-login"
+USERNAME = "AH09451"
+PASSWORD = "Singl@Bor1ng" 
+
+# Setup Chrome options (Optional: add --headless to run without a window)
+chrome_options = Options()
+# chrome_options.add_argument("--headless") 
+
+# Initialize Driver with SSL bypass
+os.environ['WDM_SSL_VERIFY'] = '0'  # Disable SSL verification for webdriver-manager
+driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
+
+try:
+    # 1. Navigate to the page
+    print("Navigating to OEM login page...")
+    driver.get(OEM_URL)
+    
+    # Wait for page to load
+    wait = WebDriverWait(driver, 20)
+    print("Waiting for page to load...")
+    
+    # Print page title for confirmation
+    print(f"Page loaded: {driver.title}")
+    
+    # Wait a bit more for dynamic content to load
+    time.sleep(3)
+    
+    
+    
+    
+    # Try multiple strategies to find username field
+    user_field = None
+    username_selectors = [
+        (By.ID, "j_username::content"),
+        (By.NAME, "j_username"),
+        (By.ID, "sso_username"),
+        (By.ID, "username"),
+        (By.ID, "user"),
+        (By.ID, "userid"),
+        (By.NAME, "sso_username"),
+        (By.NAME, "username"),
+        (By.NAME, "user"),
+        (By.XPATH, "//input[@type='text']"),
+        (By.XPATH, "//input[contains(@placeholder, 'user')]"),
+        (By.XPATH, "//input[contains(@placeholder, 'User')]"),
+        (By.XPATH, "//input[contains(@id, 'user')]"),
+        (By.XPATH, "//input[contains(@name, 'user')]"),
+    ]
+    
+    print("Locating username field...")
+    for selector_type, selector_value in username_selectors:
+        try:
+            user_field = wait.until(EC.presence_of_element_located((selector_type, selector_value)))
+            print("Username field found")
+            break
+        except TimeoutException:
+            continue
+    
+    if not user_field:
+        raise Exception("Could not locate username field with any known selector")
+    
+    # Try multiple strategies to find password field
+    pass_field = None
+    password_selectors = [
+        (By.ID, "j_password::content"),
+        (By.NAME, "j_password"),
+        (By.ID, "ssopassword"),
+        (By.ID, "password"),
+        (By.ID, "pass"),
+        (By.ID, "pwd"),
+        (By.NAME, "ssopassword"),
+        (By.NAME, "password"),
+        (By.NAME, "pass"),
+        (By.XPATH, "//input[@type='password']"),
+        (By.XPATH, "//input[contains(@placeholder, 'password')]"),
+        (By.XPATH, "//input[contains(@placeholder, 'Password')]"),
+        (By.XPATH, "//input[contains(@id, 'pass')]"),
+        (By.XPATH, "//input[contains(@name, 'pass')]"),
+    ]
+    
+    print("Locating password field...")
+    for selector_type, selector_value in password_selectors:
+        try:
+            pass_field = driver.find_element(selector_type, selector_value)
+            print("Password field found")
+            break
+        except NoSuchElementException:
+            continue
+    
+    if not pass_field:
+        raise Exception("Could not locate password field with any known selector")
+    
+    # Try multiple strategies to find login button
+    login_button = None
+    button_selectors = [
+        (By.ID, "signin_button"),
+        (By.ID, "login_button"),
+        (By.ID, "submit"),
+        (By.ID, "loginBtn"),
+        (By.NAME, "signin_button"),
+        (By.NAME, "login"),
+        (By.NAME, "submit"),
+        (By.XPATH, "//input[@type='submit']"),
+        (By.XPATH, "//button[@type='submit']"),
+        (By.XPATH, "//button[contains(text(), 'Sign')]"),
+        (By.XPATH, "//button[contains(text(), 'Login')]"),
+        (By.XPATH, "//input[@value='Sign In']"),
+        (By.XPATH, "//input[@value='Login']"),
+    ]
+    
+    print("Locating login button...")
+    for selector_type, selector_value in button_selectors:
+        try:
+            login_button = driver.find_element(selector_type, selector_value)
+            print("Login button found")
+            break
+        except NoSuchElementException:
+            continue
+    
+    if not login_button:
+        raise Exception("Could not locate login button with any known selector")
+    
+    # 3. Enter Credentials
+    print("Entering credentials...")
+    user_field.clear()
+    user_field.send_keys(USERNAME)
+    
+    pass_field.clear()
+    pass_field.send_keys(PASSWORD)
+    print("Credentials entered")
+    
+    # 4. Click Login
+    print("Clicking login button...")
+    login_button.click()
+    
+    # Wait to see if login was successful
+    time.sleep(5)
+    print("Login sequence completed.")
+    print(f"Current URL after login: {driver.current_url}")
+
+except Exception as e:
+    print(f"An error occurred: {e}")
+    print(f"Current URL when error occurred: {driver.current_url}")
+    
+    # Take a screenshot for debugging
+    try:
+        driver.save_screenshot("error_screenshot.png")
+        print("Screenshot saved as 'error_screenshot.png'")
+    except:
+        print("Could not save screenshot")
+
+# Keep the browser open for a moment or driver.quit() to close
+# driver.quit()
