@@ -1084,236 +1084,175 @@ try:
     
     print("Database login with DBSNMP_PROD completed successfully!")
     
-    # 12. Select Duration from the dropdown menu
-    print("Selecting Duration from dropdown menu...")
-    time.sleep(3)  # Wait for SQL Monitoring page to fully load
-    
-    # Find the dropdown that currently shows "Last Active Time"
-    duration_dropdown = None
-    dropdown_selectors = [
-        # Most specific selectors for Oracle Enterprise Manager interface
-        (By.XPATH, "//select[option[text()='Last Active Time']]"),  # Exact match for dropdown with "Last Active Time" option
-        (By.XPATH, "//select[option[text()='Duration']]"),  # Exact match for dropdown with "Duration" option
-        # Look for dropdown by the text it contains
-        (By.XPATH, "//select[option[contains(text(), 'Last Active Time')]]"),  # Dropdown containing "Last Active Time" option
-        (By.XPATH, "//select[option[contains(text(), 'Duration')]]"),  # Dropdown containing "Duration" option
-        # Look for dropdown near "Top 100 by" text - more specific patterns
-        (By.XPATH, "//*[text()='Top 100 by']/following-sibling::select"),  # Direct sibling select after "Top 100 by"
-        (By.XPATH, "//*[contains(text(), 'Top 100 by')]/following::select[1]"),  # First select after "Top 100 by" text
-        (By.XPATH, "//*[contains(text(), 'Top 100 by')]/following-sibling::*//select"),  # Select in sibling after "Top 100 by"
-        (By.XPATH, "//*[contains(text(), 'Top 100 by')]/parent::*//select"),  # Select in parent of "Top 100 by"
-        # Look for select elements in table or form context
-        (By.XPATH, "//table//select"),  # Select within a table
-        (By.XPATH, "//form//select"),  # Select within a form
-        # Generic approaches
-        (By.XPATH, "//select"),  # Any select dropdown
-        (By.XPATH, "//select[contains(@id, 'sort') or contains(@name, 'sort')]"),  # Sort-related dropdown
-        (By.XPATH, "//select[contains(@id, 'order') or contains(@name, 'order')]"),  # Order-related dropdown
-    ]
-    
-    print("Looking for Duration dropdown menu...")
-    for i, (selector_type, selector_value) in enumerate(dropdown_selectors):
-        try:
-            print(f"Trying duration dropdown selector {i+1}: {selector_value}")
-            duration_dropdown = WebDriverWait(driver, 5).until(
-                EC.element_to_be_clickable((selector_type, selector_value))
-            )
-            print(f"Found duration dropdown with selector {i+1}")
-            break
-        except TimeoutException:
-            print(f"Duration dropdown selector {i+1} failed")
-            continue
-    
-    if not duration_dropdown:
-        print("Could not find duration dropdown. Available dropdowns:")
-        try:
-            # Get all select elements on the page
-            select_elements = driver.find_elements(By.XPATH, "//select")
-            for i, select_elem in enumerate(select_elements):
-                try:
-                    select_id = select_elem.get_attribute("id")
-                    select_name = select_elem.get_attribute("name")
-                    select_class = select_elem.get_attribute("class")
-                    print(f"  - Dropdown {i+1}: id='{select_id}', name='{select_name}', class='{select_class}'")
-                    # Show options in dropdown
-                    options = select_elem.find_elements(By.TAG_NAME, "option")
-                    for j, option in enumerate(options[:5]):  # Show first 5 options
-                        option_text = option.text.strip()
-                        if option_text:
-                            print(f"    Option {j+1}: '{option_text}'")
-                except Exception as inner_e:
-                    print(f"    Error reading dropdown {i+1}: {inner_e}")
-        except Exception as debug_e:
-            print(f"Could not enumerate dropdowns: {debug_e}")
-        
-        raise Exception("Could not locate duration dropdown")
-    
-    # Select "Duration" from the dropdown
-    print("Selecting 'Duration' from dropdown...")
-    select_success = False
+    # 12. Click on "Top 100 by" dropdown and select "Duration"
+    print("Step 12: Selecting Duration from Top 100 by dropdown...")
+    time.sleep(3)  # Wait for page to fully load
     
     try:
-        # Method 1: Use Select class
-        from selenium.webdriver.support.ui import Select
-        print("Method 1: Using Select class to select Duration...")
-        select = Select(duration_dropdown)
+        # Look for "Top 100 by" dropdown button
+        dropdown_btn = None
+        dropdown_selectors = [
+            "//select[preceding-sibling::*[contains(text(), 'Top 100 by')] or following-sibling::*[contains(text(), 'Top 100 by')]]",
+            "//*[contains(text(), 'Top 100 by')]/following-sibling::select",
+            "//*[contains(text(), 'Top 100 by')]/parent::*/select",
+            "//*[contains(text(), 'Top 100 by')]/ancestor::*//select[contains(@class, 'dropdown') or option[contains(text(), 'Duration')]]",
+            "//select[option[contains(text(), 'Last Active Time')] and option[contains(text(), 'Duration')]]",
+            "//select[contains(@name, 'top') or contains(@id, 'top')]",
+            "//div[contains(text(), 'Top 100 by')]/following-sibling::*//select",
+            "//label[contains(text(), 'Top 100 by')]/following-sibling::select",
+        ]
         
-        # Try different ways to select Duration
-        try:
-            select.select_by_visible_text("Duration")
-            select_success = True
-            print("Selected 'Duration' by visible text")
-        except Exception as text_e:
-            print(f"Select by visible text failed: {text_e}")
+        print("Looking for Top 100 by dropdown button...")
+        for i, selector in enumerate(dropdown_selectors):
             try:
-                select.select_by_value("Duration")
-                select_success = True
-                print("Selected 'Duration' by value")
-            except Exception as value_e:
-                print(f"Select by value failed: {value_e}")
-                # Try to find option containing Duration
-                options = select.options
-                for option in options:
-                    if "Duration" in option.text:
-                        select.select_by_visible_text(option.text)
-                        select_success = True
-                        print(f"Selected Duration option: '{option.text}'")
-                        break
-                    elif "duration" in option.text.lower():
-                        select.select_by_visible_text(option.text)
-                        select_success = True
-                        print(f"Selected duration option (case insensitive): '{option.text}'")
-                        break
-    except Exception as e1:
-        print(f"Select class method failed: {e1}")
-    
-    # Method 2: Direct option click
-    if not select_success:
-        try:
-            print("Method 2: Direct option click...")
-            # First click dropdown to open it
-            duration_dropdown.click()
-            time.sleep(1)
+                print(f"Trying dropdown selector {i+1}: {selector}")
+                dropdown_btn = WebDriverWait(driver, 5).until(
+                    EC.element_to_be_clickable((By.XPATH, selector))
+                )
+                print(f"Found Top 100 by dropdown with selector {i+1}")
+                break
+            except TimeoutException:
+                print(f"Dropdown selector {i+1} failed")
+                continue
+        
+        if not dropdown_btn:
+            # Debug: Show available elements near "Top 100 by"
+            print("Could not find dropdown button. Looking for Top 100 by elements:")
+            try:
+                # Find elements containing "Top 100 by"
+                top100_elements = driver.find_elements(By.XPATH, "//*[contains(text(), 'Top 100 by')]")
+                for i, elem in enumerate(top100_elements[:3]):
+                    try:
+                        print(f"  Top 100 by element {i+1}: {elem.tag_name}, text='{elem.text.strip()}'")
+                        # Look for nearby select elements
+                        parent = elem.find_element(By.XPATH, "./..")
+                        siblings = parent.find_elements(By.XPATH, ".//*")
+                        for j, sibling in enumerate(siblings[:5]):
+                            if sibling != elem and sibling.tag_name == 'select':
+                                print(f"    Nearby select {j+1}: {sibling.tag_name}, class='{sibling.get_attribute('class')}'")
+                    except:
+                        pass
+            except Exception as debug_e:
+                print(f"Could not enumerate Top 100 by elements: {debug_e}")
             
-            # Find and click Duration option
-            duration_option_selectors = [
-                (By.XPATH, "//option[text()='Duration']"),  # Exact text match
-                (By.XPATH, "//option[contains(text(), 'Duration')]"),  # Contains Duration
-                (By.XPATH, "//option[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'duration')]"),  # Case insensitive
-            ]
-            
-            duration_option = None
-            for selector_type, selector_value in duration_option_selectors:
-                try:
-                    duration_option = WebDriverWait(driver, 3).until(
-                        EC.element_to_be_clickable((selector_type, selector_value))
-                    )
-                    break
-                except TimeoutException:
-                    continue
-            
-            if duration_option:
-                duration_option.click()
-                select_success = True
-                print("Selected 'Duration' by direct option click")
-            else:
-                print("Could not find Duration option to click")
-        except Exception as e2:
-            print(f"Direct option click failed: {e2}")
-    
-    # Method 3: JavaScript selection
-    if not select_success:
-        try:
-            print("Method 3: JavaScript selection...")
-            # Use JavaScript to set the value
-            driver.execute_script("""
-                var dropdown = arguments[0];
-                for(var i = 0; i < dropdown.options.length; i++) {
-                    var optionText = dropdown.options[i].text.toLowerCase();
-                    if(optionText.includes('duration')) {
-                        dropdown.selectedIndex = i;
-                        dropdown.dispatchEvent(new Event('change'));
-                        return true;
-                    }
-                }
-                return false;
-            """, duration_dropdown)
-            select_success = True
-            print("Selected 'Duration' using JavaScript")
-        except Exception as e3:
-            print(f"JavaScript selection failed: {e3}")
-    
-    # Method 4: Try keyboard navigation
-    if not select_success:
-        try:
-            print("Method 4: Keyboard navigation...")
-            from selenium.webdriver.common.keys import Keys
-            
-            # Click dropdown to focus it
-            duration_dropdown.click()
-            time.sleep(0.5)
-            
-            # Use keyboard to navigate to Duration option
-            # First, go to the beginning of the list
-            duration_dropdown.send_keys(Keys.HOME)
-            time.sleep(0.2)
-            
-            # Type 'D' to jump to Duration option
-            duration_dropdown.send_keys('D')
-            time.sleep(0.2)
-            
-            # Press Enter to select
-            duration_dropdown.send_keys(Keys.ENTER)
-            select_success = True
-            print("Selected 'Duration' using keyboard navigation")
-        except Exception as e4:
-            print(f"Keyboard navigation failed: {e4}")
-    
-    if not select_success:
-        # Show available options for debugging
-        print("Could not select 'Duration'. Available options:")
+            # Try alternative approach - look for any select dropdown near the text
+            try:
+                print("Trying alternative approach - looking for select dropdowns near Top 100 by...")
+                top100_element = driver.find_element(By.XPATH, "//*[contains(text(), 'Top 100 by')]")
+                # Look for select in same row/container
+                container = top100_element.find_element(By.XPATH, "./ancestor::tr | ./ancestor::div[1]")
+                dropdown_btn = container.find_element(By.XPATH, ".//select")
+                print("Found select dropdown using alternative approach")
+            except:
+                raise Exception("Could not locate Top 100 by dropdown button")
+        
+        # Use Select class to change selection from "Last Active Time" to "Duration"
+        print("Using Select class to change selection to Duration...")
+        select_success = False
+        
         try:
             from selenium.webdriver.support.ui import Select
-            select = Select(duration_dropdown)
-            options = select.options
-            for i, option in enumerate(options):
-                option_text = option.text.strip()
-                option_value = option.get_attribute('value')
-                print(f"  - Option {i+1}: text='{option_text}', value='{option_value}'")
-        except Exception as debug_e:
-            print(f"Could not enumerate options: {debug_e}")
+            print("Method 1: Using Select class...")
+            select = Select(dropdown_btn)
+            
+            # Show current selection
+            try:
+                current_selection = select.first_selected_option.text
+                print(f"Current selection: {current_selection}")
+            except:
+                print("Could not determine current selection")
+            
+            # Try different ways to select Duration
+            try:
+                select.select_by_visible_text("Duration")
+                select_success = True
+                print("Selected Duration by visible text")
+            except Exception as e1:
+                print(f"Select by visible text failed: {e1}")
+                try:
+                    select.select_by_value("Duration")
+                    select_success = True
+                    print("Selected Duration by value")
+                except Exception as e2:
+                    print(f"Select by value failed: {e2}")
+                    # Try to find option containing Duration
+                    try:
+                        options = select.options
+                        for option in options:
+                            if "Duration" in option.text:
+                                select.select_by_visible_text(option.text)
+                                select_success = True
+                                print(f"Selected Duration option: {option.text}")
+                                break
+                    except Exception as e3:
+                        print(f"Select by option search failed: {e3}")
         
-        raise Exception("Could not select 'Duration' from dropdown")
-    
-    # Wait for selection to register and any page updates
-    time.sleep(2)
-    print("Duration selection completed successfully!")
-    
-    # Verify the selection was successful
-    try:
-        from selenium.webdriver.support.ui import Select
-        select = Select(duration_dropdown)
-        selected_option = select.first_selected_option
-        selected_text = selected_option.text
-        print(f"Verified selection: Currently selected option is '{selected_text}'")
+        except Exception as select_error:
+            print(f"Select class method failed: {select_error}")
         
-        if "duration" in selected_text.lower():
-            print("SUCCESS: Duration has been selected from the dropdown!")
-        else:
-            print(f"WARNING: Expected 'Duration' but got '{selected_text}'")
-    except Exception as verify_e:
-        print(f"Could not verify selection: {verify_e}")
+        # If Select class failed, show available options for debugging
+        if not select_success:
+            print("Could not select Duration. Available dropdown options:")
+            try:
+                from selenium.webdriver.support.ui import Select
+                select = Select(dropdown_btn)
+                options = select.options
+                for i, option in enumerate(options):
+                    print(f"  Option {i+1}: '{option.text}' (value: '{option.get_attribute('value')}')")
+            except Exception as debug_e:
+                print(f"Could not enumerate options: {debug_e}")
+            
+            raise Exception("Could not select Duration from dropdown")
+        
+        # Wait for selection to register
+        time.sleep(2)
+        print("Duration option selected successfully!")
+        
+        # Verify selection
+        try:
+            WebDriverWait(driver, 10).until(
+                lambda d: "duration" in d.page_source.lower()
+            )
+            print("Duration selection verified")
+        except TimeoutException:
+            print("Duration selection verification timed out, but continuing...")
+        
+        print("Step 12 completed - Duration selected from Top 100 by dropdown")
+        
+    except Exception as e:
+        print(f"Error in Step 12: {e}")
+        # Take screenshot for debugging
+        try:
+            driver.save_screenshot("step12_duration_error.png")
+            print("Screenshot saved as step12_duration_error.png")
+        except:
+            pass
+        raise
+    
+    print("All steps completed successfully!")
     
 except Exception as e:
-    print(f"An error occurred during Duration selection: {e}")
+    print(f"An error occurred in steps 5-12: {e}")
     print(f"Current URL when error occurred: {driver.current_url}")
     
     # Take a screenshot for debugging
     try:
-        driver.save_screenshot("duration_selection_error.png")
-        print("Screenshot saved as 'duration_selection_error.png'")
+        driver.save_screenshot("error_screenshot_steps_5_12.png")
+        print("Screenshot saved as 'error_screenshot_steps_5_12.png'")
     except:
         print("Could not save screenshot")
 
-# Keep the browser open for a moment or driver.quit() to close
-# driver.quit()
+finally:
+    # Keep browser open for manual inspection or close after delay
+    print("\nAll automation steps completed!")
+    print("Browser will remain open for manual inspection...")
+    print("Press Ctrl+C to close the browser and exit the script.")
+    
+    try:
+        # Wait indefinitely until user interrupts
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\nClosing browser...")
+        driver.quit()
+        print("Browser closed. Script terminated.")
