@@ -1,1 +1,958 @@
+import paramiko
+import logging
+import time
+import win32com.client as win32
+import pandas as pd
+import os
+import re
+from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from typing import List, Dict
+from functools import wraps
+import random
 
+# ================== Time Zones ==================
+try:
+    from zoneinfo import ZoneInfo
+    IST = ZoneInfo("Asia/Kolkata")
+    ET = ZoneInfo("America/New_York")
+except ImportError:
+    import pytz
+    IST = pytz.timezone("Asia/Kolkata")
+    ET = pytz.timezone("America/New_York")
+fmt = "%Y-%m-%d %I:%M:%S %p %Z"
+
+start_ist = datetime.now(IST).replace(microsecond=0)
+start_et = start_ist.astimezone(ET)
+
+print(f"\n🚀 SPS Non-Prod Env System Java and Oracle Client Java Paths Details Auditing started at {start_ist.strftime(fmt)} / {start_et.strftime(fmt)}")
+
+# ====================== CONFIGURATION ======================
+
+@dataclass
+class AppServers:
+    name: str
+    servers: List[str]
+
+# === SERVER INVENTORY ===
+INVENTORY: List[AppServers] = [
+    AppServers("DEV PEGA", [
+        "DC04DLVPEG318","DC04DLVPEG319","DC04DLVPEG323","DC04DLVPEG324","DC04DLVPEG326",
+        "DC04DLVPEG327","DC04DLVPEG329","DC04DLVPEG330","DC04DLVPEG332","DC04DLVPEG333",
+        "DC04DLVPEG335","DC04DLVPEG336","DC04DLVPEG338","DC04DLVPEG339"
+    ]),
+    AppServers("SBX PEGA", [
+        "DC04DLVPEG317","DC04DLVPEG322","DC04DLVPEG325","DC04DLVPEG328",
+        "DC04DLVPEG331","DC04DLVPEG334","DC04DLVPEG337"
+    ]),
+    AppServers("SIT PEGA", [
+        "DC04TLVPEG413","DC04TLVPEG414","DC04TLVPEG433","DC04TLVPEG434","DC04TLVPEG452",
+        "DC04TLVPEG453","DC04TLVPEG456","DC04TLVPEG457","DC04TLVPEG460","DC04TLVPEG461",
+        "DC04TLVPEG464","DC04TLVPEG465","DC04TLVPEG468","DC04TLVPEG469"
+    ]),
+    AppServers("UAT PEGA", [
+        "DC04TLVPEG415","DC04TLVPEG416","DC04TLVPEG435","DC04TLVPEG436","DC04TLVPEG454",
+        "DC04TLVPEG455","DC04TLVPEG458","DC04TLVPEG459","DC04TLVPEG462","DC04TLVPEG463",
+        "DC04TLVPEG466","DC04TLVPEG467","DC04TLVPEG470","DC04TLVPEG471"
+    ]),
+    AppServers("PERF1 PEGA", [
+        "VA10TLVPEG366","VA10TLVPEG367","VA10TLVPEG368","DC04TLVPEG417","DC04TLVPEG418",
+        "DC04TLVPEG419","DC04TLVPEG420","DC04TLVPEG421","DC04TLVPEG422","DC04TLVPEG423",
+        "DC04TLVPEG424","DC04TLVPEG425","DC04TLVPEG426","DC04TLVPEG427","DC04TLVPEG428",
+        "DC04TLVPEG429","DC04TLVPEG430","DC04TLVPEG431"
+    ]),
+    AppServers("PERF2 PEGA", [
+        "VA10TLVPEG363","VA10TLVPEG364","VA10TLVPEG365","DC04TLVPEG437","DC04TLVPEG438",
+        "DC04TLVPEG439","DC04TLVPEG440","DC04TLVPEG441","DC04TLVPEG442","DC04TLVPEG443",
+        "DC04TLVPEG444","DC04TLVPEG445","DC04TLVPEG446","DC04TLVPEG447","DC04TLVPEG448",
+        "DC04TLVPEG449","DC04TLVPEG450","DC04TLVPEG451"
+    ]),
+    AppServers("Roster Automation", [
+        "DC04DLVSPS300","DC04TLVSPS302","DC04TLVSPS306","DC04TLVSPS304","DC04TLVSPS307",
+        "VA33TLVPEG414","VAAZTLVSPS300","DC04TLVSPS305","DC04TLVSPS308","DC04TLVSPS300",
+        "DC04TLVSPS301","VA10TLVPEG331","VAAZTLVSPS301","VAAZTLVSPS302"
+    ]),
+    AppServers("SPSMDM Python", [
+        "VA10DLVSPS300","VA10DLVSPS301","VA10TLVSPS300","VA10TLVSPS301","VA10TLVSPS302",
+        "VA10TLVSPS303","VA33DLVSPS300","VA33DLVSPS301","VA33DLVSPS302","VA33DLVSPS303",
+        "VA33TLVSPS300","VA33TLVSPS301","VA33TLVSPS302","VA33TLVSPS303","VA33TLVSPS304"
+    ]),
+    AppServers("SPSCore Services", [
+        "VA33DLVWBS388","VA33DLVWBS389","VA33DLVWBS390","VA33DLVWBS391","VA33DLVWBS382",
+        "VA33DLVWBS383","VA33DLVWBS384","VA33DLVWBS387","VA33DLVWBS400","VA33DLVWBS401",
+        "VA33DLVWBS381","VA33DLVWBS385","VA33DLVWBS386","VA33DLVWBS398","VA33DLVWBS399",
+        "VA33DLVWBS392","VA33DLVWBS396","VA33DLVWBS397","VA33DLVWBS404","VA33DLVWBS405",
+        "VA33DLVWBS406","VA33DLVWBS407","VA33DLVWBS313","VA33DLVWBS314","VA33DLVWBS370",
+        "VA33DLVWBS371","DC04DLVWBS338","DC04DLVWBS339","VA10DLVWBS358","VA10DLVWBS359",
+        "DC04TLVWBS398","DC04TLVWBS399","VA33TLVWBS543","VA33TLVWBS568","VA33TLVWBS356",
+        "VA33TLVWBS357","VA33TLVWBS539","VA33TLVWBS540","VA10TLVWBS710","VA10TLVWBS711",
+        "VA10TLVWBS712","VA10TLVWBS713","VA10TLVWBS714","VA10TLVWBS715","VA10TLVWBS716",
+        "VA10TLVWBS717","VA10TLVWBS718","VA10TLVWBS719","VA10TLVWBS720","VA10TLVWBS721",
+        "VA33TLVWBS544","VA33TLVWBS545","DC04TLVWBS396","DC04TLVWBS397","VA33TLVWBS569",
+        "VA33TLVWBS570","VA33TLVWBS524","VA33TLVWBS574","VA33TLVWBS575","VA33TLVWBS358",
+        "VA33TLVWBS541","VA33TLVWBS542","VA33TLVWBS538","VA10TLVWBS739","VA33TLVWBS576",
+        "DC04TLVWBS370"
+    ]),
+    AppServers("UIX", [
+        "DC04DLVWBS342","DC04DLVWBS309","DC04TLVWBS309","DC04TLVWBS426","DC04TLVWBS325","DC04TLVWBS326",
+        "DC04TLVWBS427","DC04TLVWBS428","DC04TLVWBS339","DC04TLVWBS340"
+    ]),
+    AppServers("DART UI", [
+        "DC04DLVWBS318","DC04TLVWBS342","DC04TLVWBS345","DC04TLVWBS346","DC04TLVWBS347",
+        "DC04TLVWBS341"
+    ]),
+    AppServers("PKM", [
+        "DC04DLVWBS331","DC04DLVWBS330","DC04TLVWBS367","DC04TLVWBS365","DC04TLVWBS369",
+        "DC04TLVWBS368","DC04TLVWBS386","DC04TLVWBS387","DC04TLVWBS388","DC04TLVWBS389"
+    ]),
+    AppServers("MDM/MATCH", [
+        "VA33DLVWBS402","VA33DLVWBS412","VA33DLVWBS413","VA33TLVWBS571","VA33TLVWBS577",
+        "VA33TLVWBS578","VA10TLVWBS630","VA33TLVWBS572","VA33TLVWBS579","VA10TLVWBS628",
+        "VA10TLVWBS629","VA10TLVWBS631","VA10DLVWBS354"
+    ]),
+    AppServers("CyberARK POC", [
+        "VA10TLVPEG357","VA10TLVPEG358"
+    ]),
+    AppServers("SPSNMS TOOL", ["VA10TLVPEG332"]),
+    AppServers("Repurposed PEGA", [
+        "VA10DLVPEG303","VA33DLVPEG365","VA33DLVPEG366"
+    ]),
+    AppServers("KAFKA", [
+        "VA10TLVKAF300","VA10TLVKAF301","VA33DLVKAF307","VA33TLVKAF323","VA33TLVKAF324"
+    ]),
+    AppServers("Prov360/ProvRestore/SPSAudit", ["VA33DLVWBS376","VA33TLVWBS555","VA33TLVWBS558"]),
+    AppServers("Master Data Engine CalloutApp", ["VA10N10156","VA10N10157"]),
+    AppServers("Enterprise Provider DatabaseSolution LegacyApp", ["VAATHMR205","VAATHMR207","VAATHMR209"]),
+    AppServers("NPI Batch Engine", ["VAATHMR191","VAATHMR192","VAATHMR246","VAATHMR247"]),
+    AppServers("Database-DB2/UDB",["VAATHMR310","VAATHMR311"]),
+    AppServers("PARES Inactive", ["VA33TLVWBS559","VA33TLVWBS560","VA33TLVIHS569","VA33TLVIHS570","VA33TLVIHS571","VA33TLVIHS572"]),
+    AppServers("PEGA Inactive", [
+        "VA33TLVATC312","VA33TLVATC313","VA33TLVATC314","VA33TLVATC315","VA33TLVATC316","VA33TLVATC317",
+        "VA33TLVIHS588","VA33TLVIHS589","VA33TLVIHS590"
+    ]),
+    AppServers("CAREMORE Inactive", [
+        "VAAZTLVWBS311.CAREMORE.COM","VAAZTLVWBS312.CAREMORE.COM","VAAZTLVWBS313.CAREMORE.COM","VAAZTLVWBS314.CAREMORE.COM",
+        "VAAZTLVWBS315.CAREMORE.COM"
+    ]),
+    AppServers("Sanctioned ProviderSystem Inactive", [
+        "DC04DLVSPS301","DC04TLVSPS309","DC04TLVSPS310","DC04TLVSPS311","DC04TLVSPS312"
+    ]),
+    AppServers("SPS CoreService Inactive", ["VA10TLVWBS740"]),
+    AppServers("Blue Provider Database", ["VA33DLVORC325","VA10TLVORC307"]),
+    AppServers("SPS DD SOA Consumption layer", ["DC04DLVMDB312"]),
+]
+
+# ====================== CREDENTIALS ======================
+
+DEFAULT_USER = "an453200ad"
+password_file_path = r"C:\AutomationTools\NonProdPassword.txt"
+
+# Try to get password from file first, then environment variable
+DEFAULT_PASS = None
+try:
+    with open(password_file_path, 'r') as f:
+        DEFAULT_PASS = f.read().strip()
+        print(f"✅ Password loaded from file: {password_file_path}")
+except FileNotFoundError:
+    # Try environment variable as fallback
+    DEFAULT_PASS = os.getenv('DEFAULT_PASSWORD')
+    if DEFAULT_PASS:
+        print("✅ Password loaded from environment variable: DEFAULT_PASSWORD")
+    else:
+        print(f"Error: Password file not found at {password_file_path}")
+        print("Alternative: Set environment variable DEFAULT_PASSWORD")
+        sys.exit(1)
+except Exception as e:
+    print(f"Error reading password file: {e}")
+    sys.exit(1)
+
+SPECIAL_USER = "ah09451"
+SPECIAL_PASS = "H0m@TownL1fe"
+SPECIAL_CREDENTIAL_APPS = ["Database-DB2/UDB"]
+
+STANDARDACCOUNT_USER = "ah09451"
+STANDARDACCOUNT_PASS = "H0m@TownL1fe"
+STANDARDACCOUNT_CREDENTIAL_APPS = ["Database-DB2/UDB"]
+
+TIMEOUT = 15
+MAX_WORKERS = 10
+
+# ====================== RETRY CONFIGURATION ======================
+MAX_RETRY_ATTEMPTS = 3
+BASE_RETRY_DELAY = 5  # seconds - Updated to 5s as requested
+MAX_RETRY_DELAY = 30  # seconds
+RETRY_BACKOFF_MULTIPLIER = 2
+COMMAND_TIMEOUT = 15  # timeout for individual SSH commands
+
+APPLICATION_JAVA_PATHS = [
+    "/apps/oracle/product/19.3/19c_Full/jdk/bin/java",
+    "/apps/oracle/product/19.3/19c_Full/jdk/jre/bin/java",
+    "/apps/oracle/product/19.3/19c_Full/client/stage/Components/oracle.jdk/1.8.0.201.0/1/DataFiles/Expanded/filegroup2/jre/bin/java"
+]
+
+SPECIAL_APPS = ["Roster Automation", "SPSMDM Python", "DART UI"]
+
+# Email Configuration
+EMAIL_TO = "Sure, Venkatesh <Venkatesh.Sure@carelon.com>"
+EMAIL_CC = "Sure, Venkatesh <Venkatesh.Sure@carelon.com>"
+#EMAIL_TO = "dl-T-SPS-Infrastructure-offshore <dl-T-SPS-Infrastructure-offshore@legato.com>"
+#EMAIL_CC = "Ande, Sreedevi <sreedevi.ande@elevancehealth.com>; Singh, Sushant <Sushant.Singh@carelon.com>"
+EMAIL_SUBJECT = "[SPS] Non-PROD Environment Servers System Java, JRE Version, VENDOR and Application Paths Java, JRE, VENDOR Details Report"
+
+# ====================== LOGGING ======================
+logging.basicConfig(level=logging.INFO, format='%(message)s')
+logger = logging.getLogger(__name__)
+logging.getLogger("paramiko.transport").setLevel(logging.WARNING)
+
+# ====================== RETRY DECORATOR ======================
+
+def retry_with_backoff(max_attempts=MAX_RETRY_ATTEMPTS, base_delay=BASE_RETRY_DELAY, 
+                      max_delay=MAX_RETRY_DELAY, backoff_multiplier=RETRY_BACKOFF_MULTIPLIER):
+    """
+    Decorator that implements exponential backoff retry logic for connection failures.
+    
+    Args:
+        max_attempts: Maximum number of retry attempts
+        base_delay: Initial delay between retries in seconds
+        max_delay: Maximum delay between retries in seconds
+        backoff_multiplier: Multiplier for exponential backoff
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            last_exception = None
+            
+            for attempt in range(max_attempts):
+                try:
+                    return func(*args, **kwargs)
+                except (paramiko.AuthenticationException, 
+                       paramiko.SSHException, 
+                       paramiko.NoValidConnectionsError,
+                       ConnectionError,
+                       TimeoutError,
+                       OSError) as e:
+                    last_exception = e
+                    
+                    if attempt == max_attempts - 1:  # Last attempt
+                        logger.error(f"❌ Final attempt failed for {func.__name__}: {str(e)[:100]}")
+                        raise e
+                    
+                    # Calculate delay with exponential backoff and jitter
+                    delay = min(base_delay * (backoff_multiplier ** attempt), max_delay)
+                    jitter = random.uniform(0.1, 0.3) * delay  # Add 10-30% jitter
+                    total_delay = delay + jitter
+                    
+                    logger.warning(f"⚠️ Attempt {attempt + 1}/{max_attempts} failed for {func.__name__}: {str(e)[:80]}")
+                    logger.info(f"🔄 Retrying in {total_delay:.1f} seconds...")
+                    time.sleep(total_delay)
+                except Exception as e:
+                    # For non-connection related errors, don't retry
+                    logger.error(f"❌ Non-retryable error in {func.__name__}: {str(e)[:100]}")
+                    raise e
+            
+            # This should never be reached, but just in case
+            raise last_exception
+        return wrapper
+    return decorator
+
+def execute_ssh_command_with_retry(ssh, command, timeout=COMMAND_TIMEOUT):
+    """
+    Execute SSH command with retry logic for timeout errors.
+    
+    Args:
+        ssh: paramiko.SSHClient instance
+        command: Command to execute
+        timeout: Command timeout in seconds
+    
+    Returns:
+        tuple: (stdin, stdout, stderr)
+    """
+    max_cmd_attempts = 2
+    for attempt in range(max_cmd_attempts):
+        try:
+            return ssh.exec_command(command, timeout=timeout)
+        except Exception as e:
+            if attempt == max_cmd_attempts - 1:
+                logger.error(f"❌ Command execution failed after {max_cmd_attempts} attempts: {command[:50]}")
+                raise e
+            logger.warning(f"⚠️ Command timeout, retrying: {command[:50]}")
+            time.sleep(1)
+
+# ====================== HELPER FUNCTIONS ======================
+
+# AIX server prefixes for identification
+AIX_PREFIXES = ("VAATHMR", "VA10N")
+
+def is_aix_server(server: str) -> bool:
+    """Checks if a server string identifies an AIX system based on multiple prefixes."""
+    if not server:
+        return False
+    # .startswith() accepts a tuple and returns True if any match
+    return server.strip().upper().startswith(AIX_PREFIXES)
+
+def get_credentials(app_name: str):
+    if app_name in STANDARDACCOUNT_CREDENTIAL_APPS:
+        logger.info(f"🔑 Using STANDARDACCOUNT credentials for: {app_name}")
+        return STANDARDACCOUNT_USER, STANDARDACCOUNT_PASS
+    return DEFAULT_USER, DEFAULT_PASS
+
+def is_java_not_found(output: str) -> bool:
+    """Enhanced detection for java not found messages"""
+    output_lower = output.lower()
+    return any(phrase in output_lower for phrase in [
+        "ksh: java: not found",
+        "command not found",
+        "bash: java:",
+        "java: command not found"
+    ])
+
+def parse_java_output(output: str) -> Dict:
+    if not output or is_java_not_found(output):
+        return {
+            "Java Version": "Not Installed",
+            "OpenJDK Runtime Environment": "Not Installed",
+            "Vendor Details": "Not Installed"
+        }
+
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    version = "Not Available"
+    runtime_env = "Not Available"
+    vendor = "Not Available"
+
+    if lines:
+        first_line = lines[0].replace('"', '').strip()
+        if "version" in first_line.lower():
+            version = first_line.split("version")[-1].strip()
+        else:
+            version = first_line
+
+    for line in lines:
+        if "Runtime Environment" in line:
+            runtime_env = line
+        elif any(x in line for x in ["Server VM", "64-Bit", "OpenJDK", "Zulu", "Temurin"]):
+            vendor = line
+
+    return {
+        "Java Version": version,
+        "OpenJDK Runtime Environment": runtime_env,
+        "Vendor Details": vendor
+    }
+
+def parse_aix_lslpp_output(lslpp_output: str) -> Dict:
+    """Parse AIX lslpp output to extract Java version information"""
+    try:
+        lines = lslpp_output.split('\n')
+        java_packages = []
+        
+        for line in lines:
+            if 'java' in line.lower() and ('.' in line or 'jre' in line.lower() or 'jdk' in line.lower()):
+                parts = line.split()
+                if len(parts) >= 2:
+                    package_name = parts[0]
+                    version_info = parts[1] if len(parts) > 1 else "Unknown"
+                    java_packages.append(f"{package_name}: {version_info}")
+        
+        if java_packages:
+            # Enhanced vendor details for AIX
+            first_package = java_packages[0]
+            if "java8" in first_package.lower() or "1.8" in first_package:
+                vendor_details = "IBM J9 VM (AIX Java 8 Runtime Environment)"
+            elif "java11" in first_package.lower() or "11." in first_package:
+                vendor_details = "IBM J9 VM (AIX Java 11 Runtime Environment)"
+            else:
+                vendor_details = f"IBM J9 VM (AIX Java Runtime - {first_package.split(':')[0]})"
+                
+            return {
+                "Java Version": java_packages[0].split(':')[1].strip() if ':' in java_packages[0] else java_packages[0],
+                "OpenJDK Runtime Environment": "AIX Java Runtime - " + "; ".join(java_packages[:2]),
+                "Vendor Details": vendor_details
+            }
+        else:
+            return {"Java Version": "Not Found", "OpenJDK Runtime Environment": "Not Found", "Vendor Details": "Not Found"}
+            
+    except Exception:
+        return {"Java Version": "lslpp Parse Error", "OpenJDK Runtime Environment": "Error", "Vendor Details": "Error"}
+
+def get_aix_java_vendor_name(ssh: paramiko.SSHClient, java_path: str) -> str:
+    """Get Java vendor name for AIX systems"""
+    try:
+        # Try standard method first
+        cmd = f'{java_path} -XshowSettings:properties 2>&1 | grep "java.vm.vendor"'
+        _, stdout, stderr = execute_ssh_command_with_retry(ssh, cmd)
+        result = stdout.read().decode('utf-8', errors='ignore').strip()
+        
+        if result and "=" in result:
+            vendor = result.split("=")[-1].strip()
+            return vendor if vendor else "IBM"
+        
+        # AIX fallback - check for IBM Java characteristics
+        _, stdout, stderr = execute_ssh_command_with_retry(ssh, f'{java_path} -version')
+        version_output = (stderr.read().decode('utf-8', errors='ignore') + 
+                         stdout.read().decode('utf-8', errors='ignore')).strip()
+        
+        if "ibm" in version_output.lower() or "j9" in version_output.lower():
+            return "IBM Corporation"
+        elif "openjdk" in version_output.lower():
+            return "OpenJDK"
+        else:
+            return "IBM (AIX Default)"
+            
+    except Exception:
+        return "IBM (AIX Default)"
+
+def extract_aix_vendor_details(output: str, vendor_details: str) -> str:
+    """Extract enhanced AIX-specific vendor details from java -version output"""
+    try:
+        # Look for specific AIX Java patterns in the output
+        if "IBM J9 VM" in output or "j9" in output.lower():
+            # Extract build information if available
+            if "build" in output.lower():
+                build_match = re.search(r'build\s+([^,)]+)', output, re.IGNORECASE)
+                if build_match:
+                    build_info = build_match.group(1).strip()
+                    if "1.8" in output or "java8" in output.lower():
+                        return f"IBM J9 VM (build {build_info}, AIX Java 8)"
+                    elif "11." in output or "java11" in output.lower():
+                        return f"IBM J9 VM (build {build_info}, AIX Java 11)"
+                    else:
+                        return f"IBM J9 VM (build {build_info}, AIX Java Runtime)"
+            
+            # Fallback for IBM J9 without build info
+            if "1.8" in output or "java8" in output.lower():
+                return "IBM J9 VM (AIX Java 8 Runtime Environment)"
+            elif "11." in output or "java11" in output.lower():
+                return "IBM J9 VM (AIX Java 11 Runtime Environment)"
+            else:
+                return "IBM J9 VM (AIX Java Runtime Environment)"
+        
+        # If IBM is mentioned but not J9
+        elif "ibm" in output.lower():
+            if "1.8" in output:
+                return "IBM AIX Java 8 Runtime Environment"
+            elif "11." in output:
+                return "IBM AIX Java 11 Runtime Environment"
+            else:
+                return "IBM AIX Java Runtime Environment"
+        
+        # Use original vendor details if no specific AIX patterns found
+        return vendor_details if vendor_details != "Not Available" else "IBM AIX Java Runtime"
+        
+    except Exception:
+        return vendor_details if vendor_details != "Not Available" else "IBM AIX Java Runtime"
+
+def get_aix_java_info(ssh: paramiko.SSHClient) -> Dict:
+    """Enhanced AIX Java detection using multiple methods"""
+    try:
+        logger.info("🔍 AIX Java Detection - Method 1: Direct java -version")
+        # Method 1: Try direct java -version command
+        _, stdout, stderr = execute_ssh_command_with_retry(ssh, 'java -version')
+        output = (stderr.read().decode('utf-8', errors='ignore') + 
+                  stdout.read().decode('utf-8', errors='ignore')).strip()
+        
+        if output and not any(x in output.lower() for x in ["permission denied", "cannot execute", "not found", "ksh:", "command not found"]):
+            logger.info("✅ Method 1 Success: Found Java via direct command")
+            base_info = parse_java_output(output)
+            vendor_name = get_aix_java_vendor_name(ssh, "java")
+            
+            # Enhanced AIX vendor details extraction
+            enhanced_vendor_details = extract_aix_vendor_details(output, base_info["Vendor Details"])
+            
+            return {
+                "Java Version": base_info["Java Version"],
+                "OpenJDK Runtime Environment": base_info["OpenJDK Runtime Environment"],
+                "Vendor Details": enhanced_vendor_details,
+                "Vendor Name": vendor_name
+            }
+        
+        logger.info("🔍 AIX Java Detection - Method 2: lslpp command")
+        # Method 2: Use lslpp to check installed Java packages
+        _, stdout, stderr = execute_ssh_command_with_retry(ssh, 'lslpp -L "Java*" 2>/dev/null')
+        lslpp_output = stdout.read().decode('utf-8', errors='ignore').strip()
+        
+        if lslpp_output and "not found" not in lslpp_output.lower():
+            logger.info("✅ Method 2 Success: Found Java packages via lslpp")
+            java_info = parse_aix_lslpp_output(lslpp_output)
+            if java_info["Java Version"] != "Not Found":
+                # Add vendor name for lslpp method
+                java_info["Vendor Name"] = "IBM Corporation (AIX)"
+                return java_info
+        
+        logger.info("🔍 AIX Java Detection - Method 3: Directory scanning")
+        # Method 3: Check common AIX Java directories
+        java_dirs = [
+            "/usr/java*/bin/java",
+            "/opt/IBM/java*/bin/java", 
+            "/usr/IBM/java*/bin/java",
+            "/opt/freeware/bin/java"
+        ]
+        
+        for java_dir_pattern in java_dirs:
+            _, stdout, stderr = execute_ssh_command_with_retry(ssh, f'ls {java_dir_pattern} 2>/dev/null | head -1')
+            java_executable = stdout.read().decode('utf-8', errors='ignore').strip()
+            
+            if java_executable:
+                logger.info(f"Found Java executable: {java_executable}")
+                _, stdout, stderr = execute_ssh_command_with_retry(ssh, f'{java_executable} -version')
+                output = (stderr.read().decode('utf-8', errors='ignore') + 
+                          stdout.read().decode('utf-8', errors='ignore')).strip()
+                
+                if output and not any(x in output.lower() for x in ["permission denied", "cannot execute", "not found"]):
+                    logger.info(f"✅ Method 3 Success: Working Java found at {java_executable}")
+                    base_info = parse_java_output(output)
+                    vendor_name = get_aix_java_vendor_name(ssh, java_executable)
+                    
+                    # Enhanced AIX vendor details extraction
+                    enhanced_vendor_details = extract_aix_vendor_details(output, base_info["Vendor Details"])
+                    
+                    return {
+                        "Java Version": base_info["Java Version"],
+                        "OpenJDK Runtime Environment": base_info["OpenJDK Runtime Environment"],
+                        "Vendor Details": enhanced_vendor_details,
+                        "Vendor Name": vendor_name
+                    }
+        
+        logger.info("🔍 AIX Java Detection - Method 4: PATH detection")
+        # Method 4: Check if Java is in PATH using 'which'
+        _, stdout, stderr = execute_ssh_command_with_retry(ssh, 'which java 2>/dev/null')
+        which_java = stdout.read().decode('utf-8', errors='ignore').strip()
+        
+        if which_java and "/" in which_java:
+            logger.info(f"Found Java in PATH: {which_java}")
+            _, stdout, stderr = execute_ssh_command_with_retry(ssh, f'{which_java} -version')
+            output = (stderr.read().decode('utf-8', errors='ignore') + 
+                      stdout.read().decode('utf-8', errors='ignore')).strip()
+            
+            if output and not any(x in output.lower() for x in ["permission denied", "cannot execute", "not found"]):
+                logger.info("✅ Method 4 Success: Working Java found via PATH")
+                base_info = parse_java_output(output)
+                vendor_name = get_aix_java_vendor_name(ssh, which_java)
+                
+                # Enhanced AIX vendor details extraction
+                enhanced_vendor_details = extract_aix_vendor_details(output, base_info["Vendor Details"])
+                
+                return {
+                    "Java Version": base_info["Java Version"],
+                    "OpenJDK Runtime Environment": base_info["OpenJDK Runtime Environment"],
+                    "Vendor Details": enhanced_vendor_details,
+                    "Vendor Name": vendor_name
+                }
+        
+        logger.warning("❌ All AIX Java detection methods failed")
+        return {
+            "Java Version": "Not Found on AIX",
+            "OpenJDK Runtime Environment": "Not Found",
+            "Vendor Details": "Not Found"
+        }
+        
+    except Exception as e:
+        logger.error(f"AIX Java detection error: {e}")
+        return {
+            "Java Version": "AIX Detection Error",
+            "OpenJDK Runtime Environment": "Error",
+            "Vendor Details": "Error"
+        }
+
+def get_java_details(ssh: paramiko.SSHClient, command: str) -> Dict:
+    try:
+        _, stdout, stderr = execute_ssh_command_with_retry(ssh, f"{command} -version")
+        output = (stderr.read().decode('utf-8', errors='ignore') + 
+                  stdout.read().decode('utf-8', errors='ignore')).strip()
+       
+        return parse_java_output(output)
+       
+    except Exception:
+        return {
+            "Java Version": "Error",
+            "OpenJDK Runtime Environment": "Error",
+            "Vendor Details": "Error"
+        }
+
+def get_java_vm_vendor(ssh: paramiko.SSHClient, command: str) -> str:
+    """Get Java VM vendor using the specified command for Linux servers"""
+    try:
+        vendor_command = f"{command} -XshowSettings:properties -version 2>&1 | grep \"java.vm.vendor\" | awk -F= '{{print $2}}' | xargs"
+        _, stdout, stderr = execute_ssh_command_with_retry(ssh, vendor_command)
+        output = stdout.read().decode('utf-8').strip()
+        
+        if output and not is_java_not_found(output):
+            return output
+        else:
+            return "Not Available"
+            
+    except Exception:
+        return "Error"
+
+def get_application_java(ssh: paramiko.SSHClient, app_name: str) -> str:
+    if app_name not in SPECIAL_APPS:
+        return "NA"
+    
+    result_lines = []
+    for path in APPLICATION_JAVA_PATHS:
+        details = get_java_details(ssh, path)
+        vendor_name = get_java_vm_vendor(ssh, path)
+        result_lines.append(
+            f"Version : {details['Java Version']}\n"
+            f"Runtime : {details['OpenJDK Runtime Environment']}\n"
+            f"Vendor : {details['Vendor Details']}\n"
+            f"Vendor Name : {vendor_name}\n"
+            f"Path : {path}\n"
+        )
+    return "\n\n".join(result_lines)
+
+@retry_with_backoff()
+def establish_ssh_connection(server: str, username: str, password: str) -> paramiko.SSHClient:
+    """
+    Establish SSH connection with retry logic.
+    
+    Args:
+        server: Server hostname
+        username: SSH username
+        password: SSH password
+    
+    Returns:
+        paramiko.SSHClient: Connected SSH client
+    """
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    
+    logger.info(f"🔗 Attempting SSH connection to {server}...")
+    ssh.connect(
+        hostname=server,
+        username=username,
+        password=password,
+        timeout=TIMEOUT,
+        allow_agent=False,
+        look_for_keys=False
+    )
+    
+    # Initialize shell to ensure connection is stable
+    shell = ssh.invoke_shell()
+    time.sleep(2)
+    if shell.recv_ready():
+        shell.recv(10000)
+    shell.close()
+    
+    logger.info(f"✅ SSH connection established to {server}")
+    return ssh
+
+def check_server(server: str, app_name: str, index: int) -> Dict:
+    username, password = get_credentials(app_name)
+    is_aix = is_aix_server(server)
+   
+    row = {
+        "Index": index,
+        "Application": app_name,
+        "Server": server,
+        "System Java Version": "Pending",
+        "System OpenJDK Runtime": "Pending",
+        "System Vendor OpenJDK Details": "Pending",
+        "System Vendor Name": "Pending",
+        "Application Java Details": "Pending"
+    }
+   
+    try:
+        # Use retry-enabled SSH connection
+        ssh = establish_ssh_connection(server, username, password)
+        ssh.connect(
+            hostname=server,
+            username=username,
+            password=password,
+            timeout=TIMEOUT,
+            allow_agent=False,
+            look_for_keys=False
+        )
+       
+        shell = ssh.invoke_shell()
+        time.sleep(2)
+        if shell.recv_ready():
+            shell.recv(10000)
+
+        if is_aix:
+            # Use AIX-specific Java detection
+            sys_details = get_aix_java_info(ssh)
+            row["System Vendor Name"] = sys_details.get("Vendor Name", "AIX System")
+        else:
+            # Use standard Java detection for Linux
+            sys_details = get_java_details(ssh, "java")
+            row["System Vendor Name"] = get_java_vm_vendor(ssh, "java")
+            
+        row["System Java Version"] = sys_details["Java Version"]
+        row["System OpenJDK Runtime"] = sys_details["OpenJDK Runtime Environment"]
+        row["System Vendor OpenJDK Details"] = sys_details["Vendor Details"]
+        row["Application Java Details"] = get_application_java(ssh, app_name)
+       
+        ssh.close()
+        logger.info(f"✅ {server} ({'AIX' if is_aix else 'Linux'}) audited.")
+       
+    except Exception as e:
+        err = "Connection Failed"
+        row["System Java Version"] = err
+        row["System OpenJDK Runtime"] = err
+        row["System Vendor OpenJDK Details"] = err
+        row["System Vendor Name"] = err
+        row["Application Java Details"] = err
+        logger.error(f"❌ {server} failed: {str(e)[:80]}")
+   
+    return row
+
+def highlight_version(val, vendor_name="", runtime=""):
+    if not isinstance(val, str):
+        return val
+
+    # Red Highlight - Critical (Red Hat 11.0.x)
+    if "Red Hat" in vendor_name and "Red_Hat-11.0" in runtime:
+        return f'<span style="background-color: #FF6B6B; color: white; font-weight: bold; padding: 3px 6px; border-radius: 4px;">{val}</span>'
+
+    # Yellow Highlight - Warning (Red Hat 1.8)
+    if "Red Hat" in vendor_name and re.search(r'1\.8\.0_', runtime):
+        return f'<span style="background-color: #FFEB3B; color: black; font-weight: bold; padding: 3px 6px; border-radius: 4px;">{val}</span>'
+
+    return val
+
+def highlight_application_java_details(app_java_details):
+    """Enhanced highlighting function specifically for Application Java Details"""
+    if not isinstance(app_java_details, str) or app_java_details in ["NA", "Pending", "Error", "Connection Failed"]:
+        return app_java_details
+    
+    # Split the content into sections (each path's details)
+    sections = app_java_details.split('\n\n')
+    highlighted_sections = []
+    
+    for section in sections:
+        if not section.strip():
+            continue
+            
+        lines = section.split('\n')
+        highlighted_lines = []
+        
+        # Parse each section to extract version, runtime, vendor info
+        version_line = ""
+        runtime_line = ""
+        vendor_line = ""
+        vendor_name_line = ""
+        path_line = ""
+        
+        for line in lines:
+            line = line.strip()
+            if line.startswith("Version :"):
+                version_line = line
+            elif line.startswith("Runtime :"):
+                runtime_line = line
+            elif line.startswith("Vendor :"):
+                vendor_line = line
+            elif line.startswith("Vendor Name :"):
+                vendor_name_line = line
+            elif line.startswith("Path :"):
+                path_line = line
+        
+        # Extract values for highlighting logic
+        version_value = version_line.replace("Version :", "").strip()
+        runtime_value = runtime_line.replace("Runtime :", "").strip()
+        vendor_value = vendor_line.replace("Vendor :", "").strip()
+        vendor_name_value = vendor_name_line.replace("Vendor Name :", "").strip()
+        
+        # Apply highlighting logic based on vendor and version patterns
+        should_highlight_red = ("Red Hat" in vendor_name_value and "Red_Hat-11.0" in runtime_value)
+        should_highlight_yellow = ("Red Hat" in vendor_name_value and re.search(r'1\.8\.0_', runtime_value))
+        
+        # Apply highlighting to each line if conditions are met
+        if should_highlight_red:
+            if version_line:
+                highlighted_lines.append(f'<span style="background-color: #FF6B6B; color: white; font-weight: bold; padding: 3px 6px; border-radius: 4px;">{version_line}</span>')
+            if runtime_line:
+                highlighted_lines.append(f'<span style="background-color: #FF6B6B; color: white; font-weight: bold; padding: 3px 6px; border-radius: 4px;">{runtime_line}</span>')
+            if vendor_line:
+                highlighted_lines.append(f'<span style="background-color: #FF6B6B; color: white; font-weight: bold; padding: 3px 6px; border-radius: 4px;">{vendor_line}</span>')
+            if vendor_name_line:
+                highlighted_lines.append(f'<span style="background-color: #FF6B6B; color: white; font-weight: bold; padding: 3px 6px; border-radius: 4px;">{vendor_name_line}</span>')
+            if path_line:
+                highlighted_lines.append(path_line)  # Path doesn't need highlighting
+        elif should_highlight_yellow:
+            if version_line:
+                highlighted_lines.append(f'<span style="background-color: #FFEB3B; color: black; font-weight: bold; padding: 3px 6px; border-radius: 4px;">{version_line}</span>')
+            if runtime_line:
+                highlighted_lines.append(f'<span style="background-color: #FFEB3B; color: black; font-weight: bold; padding: 3px 6px; border-radius: 4px;">{runtime_line}</span>')
+            if vendor_line:
+                highlighted_lines.append(f'<span style="background-color: #FFEB3B; color: black; font-weight: bold; padding: 3px 6px; border-radius: 4px;">{vendor_line}</span>')
+            if vendor_name_line:
+                highlighted_lines.append(f'<span style="background-color: #FFEB3B; color: black; font-weight: bold; padding: 3px 6px; border-radius: 4px;">{vendor_name_line}</span>')
+            if path_line:
+                highlighted_lines.append(path_line)  # Path doesn't need highlighting
+        else:
+            # No highlighting needed
+            highlighted_lines = lines
+        
+        highlighted_sections.append('\n'.join(highlighted_lines))
+    
+    return '\n\n'.join(highlighted_sections)
+
+def get_audited_summary(data: List[Dict]) -> Dict:
+    df = pd.DataFrame(data)
+    total_servers = df['Server'].nunique()
+    
+    immediate = df[
+        (df['System Vendor Name'].str.contains('Red Hat', na=False)) & 
+        (df['System OpenJDK Runtime'].str.contains('Red_Hat-11.0', na=False))
+    ]['Server'].nunique()
+    
+    upgrade = df[
+        (df['System Vendor Name'].str.contains('Red Hat', na=False)) & 
+        (df['System OpenJDK Runtime'].str.contains(r'1\.8\.0_', na=False))
+    ]['Server'].nunique()
+    
+    return {
+        "Total Servers Audited": total_servers,
+        "Servers that Need Immediate Attention (Red Hat OpenJDK 11 - EOL)": immediate,
+        "Servers Requiring Upgrade (Red Hat OpenJDK 8 - EOL Nov 2026)": upgrade
+    }
+
+# ====================== REPORT & EMAIL ======================
+def create_html_report(data: List[Dict]) -> str:
+    # Same as before (kept unchanged except removing credential column)
+    html = """<table border="1" style="border-collapse: collapse; width:100%; font-family: Calibri, sans-serif; font-size: 11pt;">
+        <thead><tr style="background-color: #2E7D32; text-align: center; color: white;">
+            <th style="padding:10px;">Application Name</th>
+            <th style="padding:10px;">Server</th>
+            <th style="padding:10px;">System Java Version</th>
+            <th style="padding:10px;">System OpenJDK Runtime</th>
+            <th style="padding:10px;">System Vendor OpenJDK Details</th>
+            <th style="padding:10px;">System Vendor Name</th>
+            <th style="padding:10px;">Oracle Client Paths Java Version Details</th>
+        </tr></thead><tbody>"""
+   
+    df = pd.DataFrame(data)
+    app_counts = df['Application'].value_counts(sort=False)
+    current_app = ""
+   
+    for _, row in df.iterrows():
+        is_special = row['Application'] in SPECIAL_APPS
+        align_style = "left" if is_special else "center"
+        app_java = str(row["Application Java Details"])
+        bg_color = "#f8d7da" if "Failed" in app_java or "Error" in app_java else "#ffffff"
+
+        html += "<tr>"
+        if row['Application'] != current_app:
+            count = app_counts[row['Application']]
+            html += f'<td rowspan="{count}" style="background-color: #E8F5E9; font-weight: bold; text-align: center; vertical-align: middle;">{row["Application"]}</td>'
+            current_app = row['Application']
+       
+        html += f'<td style="padding:6px; text-align: center;">{row["Server"]}</td>'
+        
+        # Apply highlighting to System Java Version
+        highlighted_version = highlight_version(row["System Java Version"], row["System Vendor Name"], row["System OpenJDK Runtime"])
+        html += f'<td style="padding:6px; text-align: center;">{highlighted_version}</td>'
+        
+        # Apply highlighting to System OpenJDK Runtime
+        highlighted_runtime = highlight_version(row["System OpenJDK Runtime"], row["System Vendor Name"], row["System OpenJDK Runtime"])
+        html += f'<td style="padding:6px; text-align: left; white-space: pre-wrap;">{highlighted_runtime}</td>'
+        
+        # Apply highlighting to System Vendor OpenJDK Details
+        highlighted_vendor_details = highlight_version(row["System Vendor OpenJDK Details"], row["System Vendor Name"], row["System OpenJDK Runtime"])
+        html += f'<td style="padding:6px; text-align: left; white-space: pre-wrap;">{highlighted_vendor_details}</td>'
+        
+        # Apply highlighting to System Vendor Name
+        highlighted_vendor_name = highlight_version(row["System Vendor Name"], row["System Vendor Name"], row["System OpenJDK Runtime"])
+        html += f'<td style="padding:6px; text-align: center;">{highlighted_vendor_name}</td>'
+        # Apply comprehensive highlighting to Application Java Details
+        highlighted_app_java = highlight_application_java_details(app_java)
+        cell_content = highlighted_app_java.replace('\n', '<br>')
+        html += f'<td style="padding:6px; background-color: {bg_color}; text-align: {align_style}; white-space: pre-wrap;">{cell_content}</td>'
+        html += "</tr>"
+    html += "</tbody></table>"
+    return html
+
+def draft_email(data: List[Dict], excel_file: str, summary: Dict, end_et, duration_str):
+    print("\n📧 Drafting Outlook email...")
+    try:
+        outlook = win32.Dispatch('outlook.application')
+        mail = outlook.CreateItem(0)
+        mail.To = EMAIL_TO
+        mail.CC = EMAIL_CC
+        mail.Subject = EMAIL_SUBJECT
+        mail.HTMLBody = f"""
+        <html><body>
+            <p>Hi Team,</p>
+            <p>Please find the below consolidated report of detailed Java version for SPS Non-Prod Servers:</p>
+            <p>SPS Non-Prod Env System Java and Oracle Client Java Paths Details Auditing Started at <i>{start_et.strftime(fmt)}</i></p>
+            <h3 style="color:#2E7D32;">📊 Audit Summary:</h3>
+            <ul>
+                <li><b>Total Servers Audited:</b> <span style="font-size:15pt;">{summary['Total Servers Audited']}</span></li>
+                <li><b style="color:#D32F2F;">Servers that Need Immediate Attention (Red Hat OpenJDK 11 - EOL):</b> <span style="font-size:15pt; color:#D32F2F;">{summary['Servers that Need Immediate Attention (Red Hat OpenJDK 11 - EOL)']}</span></li>
+                <li><b style="color:#F57C00;">Servers Requiring Upgrade (Red Hat OpenJDK 8 - EOL November 2026):</b> <span style="font-size:15pt; color:#F57C00;">{summary['Servers Requiring Upgrade (Red Hat OpenJDK 8 - EOL Nov 2026)']}</span></li>
+            </ul>
+
+            {create_html_report(data)}
+            <br>
+            <p><b style="color:red;">⚠ Important Note:</b><br>
+            • Red highlight → Red Hat OpenJDK 11.0.x (End of Support - Immediate Action Required)<br>
+            • Yellow highlight → Red Hat OpenJDK 8 (EOL by November 2026 - Plan Upgrade)<br>
+
+            <p>The full detailed report is attached as Excel for your reference</p>
+            <p><b>Note:</b> Detailed Oracle Client Application Java Paths checking is performed only for <b>Roster Automation</b> and <b>SPSMDM Python</b> servers.</p>
+
+	    <p>
+	       SPS Non-Prod Env System Java and Oracle Client Java Paths Details Auditing Finished at <i>{end_et.strftime(fmt)}</i><br>
+	       SPS Non-Prod Env System Java and Oracle Client Java Paths Details Audit Verified within <i>{duration_str}</i>
+	    </p>
+            <p><i>This is an automated report.</i></p>
+            <p>Regards,<br><b>Sure Venkatesh</b></p>
+        </body></html>"""
+
+        if os.path.exists(excel_file):
+            absolute_excel_path = os.path.abspath(excel_file)
+            mail.Attachments.Add(absolute_excel_path)
+        mail.Display()
+        logger.info("📧 Outlook email draft created with attachment.")
+    except Exception as e:
+        logger.error(f"Failed to draft email: {e}")
+
+# ====================== MAIN ======================
+if __name__ == "__main__":
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+    EXCEL_REPORT_NAME = f"NonProdServers_SystemJava_Version_and_OracleClientPaths_Java_Version_Report_{timestamp}.xlsx"
+   
+    print("🚀 Starting System Java and Oracle Client Paths Java Audit...\n")
+   
+    tasks = []
+    idx = 0
+    for app in INVENTORY:
+        for server in app.servers:
+            tasks.append((server, app.name, idx))
+            idx += 1
+
+    results = []
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {executor.submit(check_server, t[0], t[1], t[2]): t for t in tasks}
+        for future in as_completed(futures):
+            results.append(future.result())
+   
+    results.sort(key=lambda x: x['Index'])
+   
+    final_df = pd.DataFrame(results).drop(columns=['Index'])
+   
+    # Final columns (Credential Used and Server Count columns removed)
+    cols = ['Application', 'Server', 'System Java Version',
+            'System OpenJDK Runtime', 'System Vendor OpenJDK Details', 'System Vendor Name',
+            'Application Java Details']
+    
+    final_df = final_df[cols]
+   
+    final_df.to_excel(EXCEL_REPORT_NAME, index=False)
+    print(f"💾 Excel report saved: {EXCEL_REPORT_NAME}")
+
+    # End Time (No Microseconds) & Duration Calculation in Hours, Minutes, and Seconds
+    end_ist = datetime.now(IST).replace(microsecond=0)
+    end_et = end_ist.astimezone(ET)
+    duration = end_ist - start_ist
+    hours, rem = divmod(int(duration.total_seconds()), 3600)
+    minutes, seconds = divmod(rem, 60)
+    duration_str = f"{hours}h {minutes}m {seconds}s"
+   
+    # Generate summary and draft email after all variables are defined
+    summary = get_audited_summary(results)
+    draft_email(results, EXCEL_REPORT_NAME, summary, end_et, duration_str)
+    
+    print("\n✅ Audit Completed!")
+    print(f"\n🏁 SPS Non-Prod Env System Java and Oracle Client Java Paths Details Auditing Finished at: {end_ist.strftime(fmt)}/{end_et.strftime(fmt)}")
+    print(f"\n⏱️ SPS Non-Prod Env System Java and Oracle Client Java Paths Details Auditing Duration: {duration_str}")
